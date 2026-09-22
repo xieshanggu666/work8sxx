@@ -65,7 +65,7 @@ export const ACTIVITIES = [
     endAt: '2026-09-30',
     prizes: [
       { id: 'p1', name: '蓝牙耳机', rarity: 'legendary', stock: 5, remain: 5, weight: 1, emoji: '🎧', physical: true },
-      { id: 'p2', name: '视频月卡', rarity: 'epic', stock: 50, remain: 50, weight: 6, emoji: '🎬', physical: false },
+      { id: 'p2', name: '视频月卡', rarity: 'epic', stock: 50, remain: 50, weight: 6, emoji: '🎬', physical: false, coupon: true, validDays: 30 },
       { id: 'p3', name: '20积分', rarity: 'rare', stock: 400, remain: 400, weight: 25, emoji: '🪙', physical: false },
       { id: 'p4', name: '5积分', rarity: 'common', stock: 800, remain: 800, weight: 50, emoji: '✨', physical: false },
       { id: 'p5', name: '谢谢参与', rarity: 'none', stock: 99999, remain: 99999, weight: 100, emoji: '🤝', physical: false }
@@ -85,13 +85,16 @@ export const TASKS = [
   { id: 't-invite', label: '邀请好友注册', reward: 50, icon: '🤝', type: 'once' }
 ]
 
-// 积分商城兑换商品（physical: 是否需要物流发货——实物填写收货信息、运营发货；虚拟券卡直接到账）
+// 积分商城兑换商品
+// physical: 实物需物流发货（填写收货信息、运营发货）；
+// coupon:   卡券交付（中奖/兑换即发券入卡券账户，用户出示券码、运营核销，validDays 为有效期天数）；
+// 其余虚拟商品（如积分）直接到账。
 export const SHOP_GOODS = [
-  { id: 'g1', name: '满50减10优惠券', cost: 30, icon: '🎟️', stock: 200, remain: 200, physical: false },
-  { id: 'g2', name: '视频会员周卡', cost: 80, icon: '🎬', stock: 100, remain: 100, physical: false },
+  { id: 'g1', name: '满50减10优惠券', cost: 30, icon: '🎟️', stock: 200, remain: 200, physical: false, coupon: true, validDays: 30 },
+  { id: 'g2', name: '视频会员周卡', cost: 80, icon: '🎬', stock: 100, remain: 100, physical: false, coupon: true, validDays: 7 },
   { id: 'g3', name: '定制帆布袋', cost: 150, icon: '👜', stock: 50, remain: 50, physical: true },
   { id: 'g4', name: '盲盒福袋', cost: 200, icon: '🎁', stock: 30, remain: 30, physical: true },
-  { id: 'g5', name: '与牛人共进午餐', cost: 500, icon: '🍽️', stock: 5, remain: 5, physical: false }
+  { id: 'g5', name: '与牛人共进午餐', cost: 500, icon: '🍽️', stock: 5, remain: 5, physical: false, coupon: true, validDays: 14 }
 ]
 
 export const DEMO_USER = {

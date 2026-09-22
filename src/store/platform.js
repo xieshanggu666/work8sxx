@@ -33,6 +33,14 @@ function todayAt(h, m = 0) {
   d.setHours(h, m, 0, 0)
   return d.getTime()
 }
+// 业务日 + N 天（卡券有效期计算；零填充字符串与 todayStr 同格式，字典序即可比较）
+function addDays(dateStr, days) {
+  const d = new Date(`${dateStr}T00:00:00`)
+  d.setDate(d.getDate() + days)
+  const m = String(d.getMonth() + 1).padStart(2, '0')
+  const day = String(d.getDate()).padStart(2, '0')
+  return `${d.getFullYear()}-${m}-${day}`
+}
 
 // 风控规则文案
 const RULE_LABELS = {
@@ -61,6 +69,15 @@ export const SHIP_STATUS = {
   received: { label: '已收货', tone: 'muted' }
 }
 
+// 卡券状态文案与样式标记
+// active 待核销 → used 已核销；expired 到期失效（不可再核销）；void 业务撤销/对账作废
+export const COUPON_STATUS = {
+  active: { label: '待核销', tone: 'ok' },
+  used: { label: '已核销', tone: 'info' },
+  expired: { label: '已到期', tone: 'muted' },
+  void: { label: '已作废', tone: 'bad' }
+}
+
 let seq = 0
 const genId = (p) => `${p}-${Date.now()}-${seq++}`
 
@@ -74,6 +91,7 @@ export const usePlatformStore = defineStore('platform', {
     goods: [],                  // 商城商品（响应式库存 + 预占）
     records: [],                // 抽奖 / 兑换业务记录（含 frozen/released/revoked 状态）
     shipments: [],              // 实物发货单（append-only）：中奖/兑换实物且有效（正常/风控放行）后生成，走 填地址→发货→收货 流程
+    coupons: [],                // 卡券账户（append-only）：券类奖品/商品有效（正常/风控放行）后发券，用户出示券码、运营核销
     pointRecords: [],           // 积分流水（append-only，财务留痕不裁剪）
     taskClaims: [],             // 任务领奖台账（append-only）：{ taskId, bizDate 归属业务日, grantDate 实际发放日, reward, flowId }，发奖与补偿的统一判重依据
     riskOrders: [],             // 风控审核单
@@ -195,7 +213,12 @@ export const usePlatformStore = defineStore('platform', {
         shipPendingAddress: state.shipments.filter((o) => o.status === 'pending_address').length,
         shipToShip: state.shipments.filter((o) => o.status === 'to_ship').length,
         shipShipped: state.shipments.filter((o) => o.status === 'shipped').length,
-        shipReceived: state.shipments.filter((o) => o.status === 'received').length
+        shipReceived: state.shipments.filter((o) => o.status === 'received').length,
+        // 卡券看板：待核销 / 已核销 / 已到期 / 已作废
+        couponActive: state.coupons.filter((c) => c.status === 'active').length,
+        couponUsed: state.coupons.filter((c) => c.status === 'used').length,
+        couponExpired: state.coupons.filter((c) => c.status === 'expired').length,
+        couponVoid: state.coupons.filter((c) => c.status === 'void').length
       }
     },
     // 某业务日的对账差异单（一业务日一单，重复执行更新同单并保留痕迹）
@@ -243,6 +266,32 @@ export const usePlatformStore = defineStore('platform', {
         shipped: list.filter((o) => o.status === 'shipped').length,
         received: list.filter((o) => o.status === 'received').length
       }
+    },
+    // ===== 卡券账户 =====
+    // 当前用户的卡券（最新在前）
+    myCoupons(s) {
+      return [...s.coupons]
+        .filter((c) => c.userId === s.user.id)
+        .sort((a, b) => b.ts - a.ts)
+    },
+    // 业务记录对应的有效卡券（一条有效券类业务记录至多一张有效券；作废券不占位）
+    couponOfRecord: (s) => (recordId) =>
+      s.coupons.find((c) => c.recordId === recordId && c.status !== 'void') || null,
+    // 我的待核销券数（用户 Tab 角标）
+    myActiveCouponCount(s) {
+      return s.coupons.filter((c) => c.userId === s.user.id && c.status === 'active').length
+    },
+    // 卡券看板统计（按状态 + 今日核销量）
+    couponStats(s) {
+      const list = s.coupons
+      return {
+        total: list.length,
+        active: list.filter((c) => c.status === 'active').length,
+        used: list.filter((c) => c.status === 'used').length,
+        expired: list.filter((c) => c.status === 'expired').length,
+        void: list.filter((c) => c.status === 'void').length,
+        todayUsed: list.filter((c) => c.usedDate === s.todayDate).length
+      }
     }
   },
 
@@ -288,6 +337,8 @@ export const usePlatformStore = defineStore('platform', {
 
       // 冻结权益不随跨日处置：待审核/已申诉单据仍占用冻结积分与预占库存，
       // 运营可在新业务日继续放行/撤销；累计次数、历史流水/记录同样保留。
+      // 卡券到期扫描：跨日后把已过有效期的待核销券置为「已到期」（核销时另有懒检查兜底）
+      this.expireCoupons()
       this.addAuditLog('day-rollover', null,
         `业务日由 ${prev} 切换为 ${current}：每日任务与每日限次已重置，任务进度与领奖记录按业务日归档保留，审核中冻结权益保留`)
       if (showHint) {
@@ -370,7 +421,11 @@ export const usePlatformStore = defineStore('platform', {
           'ship-create': '生成发货单',
           'ship-address': '填写收货信息',
           'ship-send': '运营发货',
-          'ship-receive': '确认收货'
+          'ship-receive': '确认收货',
+          'coupon-issue': '发放卡券',
+          'coupon-verify': '核销卡券',
+          'coupon-expire': '卡券到期',
+          'coupon-void': '卡券作废'
         }[action] || action,
         orderId: orderId || '',
         operator: this.role === 'operator' ? `运营(${this.user.name})` : this.user.name,
@@ -536,9 +591,11 @@ export const usePlatformStore = defineStore('platform', {
       }
       this.records.unshift(rec)
       if (pointDelta) this.addPointRecord(pointDelta, `抽奖获得：${prize.name}`, 'reward')
-      // 实物奖品：生成发货单，引导用户填写收货信息（积分奖品/谢谢参与不涉及物流）
+      // 实物奖品：生成发货单，引导用户填写收货信息；券类奖品：发券入卡券账户（积分奖品/谢谢参与直接到账）
       const ship = this.createShipment(rec)
+      const coupon = this.issueCoupon(rec)
       if (ship) this.showToast(`🎉 获得实物：${prize.name}，请前往「物流发货」填写收货信息`, 'success')
+      else if (coupon) this.showToast(`🎟️ 获得卡券：${prize.name}，已放入「卡券核销」，到期前出示券码即可核销`, 'success')
       else if (prize.rarity === 'legendary') this.showToast(`🎉 传说大奖！${prize.name}`, 'success')
       else this.showToast(`获得：${prize.name}`, 'success')
       // 真实参与记录落账后，按归属业务日自动结算抽奖任务（达标即发奖，幂等防重）
@@ -652,9 +709,11 @@ export const usePlatformStore = defineStore('platform', {
         icon: g.icon
       }
       this.records.unshift(rec)
-      // 实物商品：生成发货单，引导用户填写收货信息（虚拟券卡直接到账）
+      // 实物商品：生成发货单，引导用户填写收货信息；券类商品：发券入卡券账户（其余虚拟商品直接到账）
       const ship = this.createShipment(rec)
+      const coupon = this.issueCoupon(rec)
       if (ship) this.showToast(`兑换成功：${g.name}，请前往「物流发货」填写收货信息`, 'success')
+      else if (coupon) this.showToast(`兑换成功：${g.name}，卡券已放入「卡券核销」，出示券码即可核销`, 'success')
       else this.showToast(`兑换成功：${g.name}`, 'success')
       return rec
     },
@@ -799,11 +858,14 @@ export const usePlatformStore = defineStore('platform', {
       rec.status = 'released'
       this.addAuditLog('release', o.id,
         `放行${o.bizType === 'draw' ? '抽奖' : '兑换'}【${o.targetName}】${note ? '；备注：' + note : ''}`)
-      // 放行后实物才"发奖"：生成发货单并通知用户填写收货信息（冻结期间不产生发货单）
+      // 放行后实物才"发奖"：生成发货单并通知用户填写收货信息；券类同步交付卡券（冻结期间均不产生）
       const ship = this.createShipment(rec)
+      const coupon = this.issueCoupon(rec)
       this.showToast(ship
         ? `已放行【${o.targetName}】，发货单已生成，等待用户填写收货信息`
-        : `已放行【${o.targetName}】`, 'success')
+        : coupon
+          ? `已放行【${o.targetName}】，卡券已交付（券码 ${coupon.code}），等待用户出示核销`
+          : `已放行【${o.targetName}】`, 'success')
       // 抽奖放行后按记录归属业务日补计任务进度（跨日审核不串当日账，幂等防重复发奖）
       if (o.bizType === 'draw') this.settleDrawTasks(rec.date)
     },
@@ -989,6 +1051,117 @@ export const usePlatformStore = defineStore('platform', {
         `确认收货【${o.targetName}】（${o.carrier} ${o.trackingNo}），订单完成`)
       this.showToast(`✅ 已确认收货：${o.targetName}`, 'success')
       return true
+    },
+
+    // ===== 卡券账户与核销 =====
+    // 券类交付判定：奖品/商品带 coupon 标记（虚拟券码交付，与积分直充/实物物流互斥）
+    _isCouponRecord(rec) {
+      if (!rec) return false
+      if (rec.type === 'draw') {
+        const prize = this.activities.find((a) => a.id === rec.activityId)
+          ?.prizes.find((p) => p.id === rec.prizeId)
+        return !!(prize && prize.coupon)
+      }
+      const g = this.goods.find((x) => x.id === rec.goodsId)
+      return !!(g && g.coupon)
+    },
+    // 券有效期（发放时快照到券实例上，后续改模板不影响已发券）
+    _couponValidDaysOf(rec) {
+      const target = rec.type === 'draw'
+        ? this.activities.find((a) => a.id === rec.activityId)?.prizes.find((p) => p.id === rec.prizeId)
+        : this.goods.find((x) => x.id === rec.goodsId)
+      return target?.validDays || 30
+    },
+    // 8 位券码（去除易混淆字符 0/O、1/I），全局唯一
+    _genCouponCode() {
+      const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
+      let code = ''
+      do {
+        code = Array.from({ length: 8 }, () => chars[Math.floor(Math.random() * chars.length)]).join('')
+      } while (this.coupons.some((c) => c.code === code))
+      return code
+    },
+    // 有效券类中奖/兑换 → 发券入账（幂等：一条业务记录至多一张有效券）
+    // 风控联动：冻结中不交付（库存仅预占）；放行后才发券；撤销业务作废、始终无券
+    issueCoupon(rec, source = '') {
+      if (!rec) return null
+      if (rec.status !== 'normal' && rec.status !== 'released') return null
+      if (!this._isCouponRecord(rec)) return null
+      if (this.coupons.some((c) => c.recordId === rec.id && c.status !== 'void')) return null
+      const isDraw = rec.type === 'draw'
+      const name = isDraw ? rec.prizeName : rec.goodsName
+      const validDays = this._couponValidDaysOf(rec)
+      const coupon = {
+        id: genId('cp'),
+        code: this._genCouponCode(),
+        recordId: rec.id,
+        userId: rec.userId || this.user.id,
+        userName: rec.userName || this.user.name,
+        bizType: rec.type,               // draw | redeem
+        name,
+        icon: rec.icon,
+        status: 'active',                // active 待核销 | used 已核销 | expired 已到期 | void 已作废
+        source: source || (rec.status === 'released' ? '风控放行' : (isDraw ? '中奖' : '积分兑换')),
+        issueDate: this.todayDate,
+        issuedAt: `${this.todayDate} ${nowTime()}`,
+        ts: Date.now(),
+        validDays,
+        expireDate: addDays(this.todayDate, validDays),
+        usedAt: '', usedBy: '', usedDate: '',
+        voidReason: ''
+      }
+      this.coupons.unshift(coupon)
+      this.addAuditLog('coupon-issue', coupon.id,
+        `发放卡券【${name}】（券码 ${coupon.code}，有效期至 ${coupon.expireDate}，来源：${coupon.source}）`)
+      return coupon
+    },
+
+    // 运营核销：用户出示券码 → 核销台录入。状态机保证不可重复核销；到期券拦截
+    verifyCoupon(codeInput) {
+      this.syncBusinessDay()
+      if (this.role !== 'operator') {
+        this.showToast('仅运营可核销卡券，请切换到运营视角', 'warn')
+        return null
+      }
+      const code = String(codeInput || '').toUpperCase().replace(/[\s-]/g, '')
+      if (!code) { this.showToast('请输入券码', 'warn'); return null }
+      const c = this.coupons.find((x) => x.code === code)
+      if (!c) { this.showToast(`券码 ${code} 不存在，请核对后重试`, 'warn'); return null }
+      if (c.status === 'used') {
+        this.showToast(`⚠️ 重复核销拦截：该券已于 ${c.usedAt} 由 ${c.usedBy} 核销`, 'warn')
+        return null
+      }
+      if (c.status === 'void') {
+        this.showToast('该卡券已作废（关联业务已撤销），不可核销', 'warn')
+        return null
+      }
+      // 到期懒检查（跨日统一扫描之外的实时兜底）
+      if (c.status === 'expired' || c.expireDate < this.todayDate) {
+        if (c.status === 'active') {
+          c.status = 'expired'
+          this.addAuditLog('coupon-expire', c.id, `卡券【${c.name}】（${c.code}）核销时发现已过有效期，置为已到期`)
+        }
+        this.showToast(`该卡券已于 ${c.expireDate} 到期，不可核销`, 'warn')
+        return null
+      }
+      c.status = 'used'
+      c.usedAt = `${this.todayDate} ${nowTime()}`
+      c.usedDate = this.todayDate
+      c.usedBy = this.user.name
+      this.addAuditLog('coupon-verify', c.id,
+        `核销卡券【${c.name}】（券码 ${c.code}，用户 ${c.userName}，来源：${c.source}）`)
+      this.showToast(`✅ 核销成功：【${c.name}】${c.userName} 的卡券已核销`, 'success')
+      return c
+    },
+
+    // 卡券到期扫描：待核销券过了有效期即置为「已到期」（不可再核销）
+    expireCoupons() {
+      const due = this.coupons.filter((c) => c.status === 'active' && c.expireDate < this.todayDate)
+      if (!due.length) return 0
+      due.forEach((c) => { c.status = 'expired' })
+      this.addAuditLog('coupon-expire', null,
+        `${due.length} 张卡券到期失效：${due.map((c) => `【${c.name}】${c.code}`).join('、')}`)
+      return due.length
     },
 
     // 更新风控规则（仅运营）
@@ -1241,10 +1414,44 @@ export const usePlatformStore = defineStore('platform', {
       }))
       this.goods.forEach((g) => pushStock('goods', null, g.id, g.name, g.icon, g))
 
+      // —— P6 卡券账户勾稽（当前态） ——
+      // 口径：有效券类业务记录（normal/released）应各有一张有效券（发放即消耗库存，核销不再动库存）；
+      //       冻结中/已撤销记录不应持有有效券；已核销券必须有核销留痕（核销人/时间）。
+      const couponItems = []
+      this.records.forEach((r) => {
+        if (!this._isCouponRecord(r)) return
+        const held = this.coupons.find((c) => c.recordId === r.id && c.status !== 'void')
+        if ((r.status === 'normal' || r.status === 'released') && !held) {
+          couponItems.push({
+            key: `cp-missing-${r.id}`, kind: 'missing', recordId: r.id,
+            name: r.type === 'draw' ? r.prizeName : r.goodsName,
+            expect: '已发券入账', actual: '券账户缺失', autoFixable: true
+          })
+        }
+        if ((r.status === 'frozen' || r.status === 'revoked') && held &&
+            (held.status === 'active' || held.status === 'used')) {
+          couponItems.push({
+            key: `cp-stray-${held.id}`, kind: 'stray', recordId: r.id, couponId: held.id,
+            name: held.name,
+            expect: r.status === 'revoked' ? '撤销后无有效券' : '冻结中不交付',
+            actual: `持有「${COUPON_STATUS[held.status].label}」券`,
+            autoFixable: r.status === 'revoked'   // 撤销残留券可自动作废；冻结中的引导人工核查
+          })
+        }
+      })
+      this.coupons.forEach((c) => {
+        if (c.status === 'used' && (!c.usedAt || !c.usedBy)) {
+          couponItems.push({
+            key: `cp-trace-${c.id}`, kind: 'trace', couponId: c.id, name: c.name,
+            expect: '核销留痕完整', actual: '缺核销人/时间', autoFixable: false
+          })
+        }
+      })
+
       const taskOpen = taskItems.length
       const stockOpen = stockItems.filter((x) => x.diff !== 0).length
       const openCount = (pointsResidual !== 0 ? 1 : 0) + taskOpen + (chainItem ? 1 : 0) +
-        frozenItems.length + stockOpen
+        frozenItems.length + stockOpen + couponItems.length
 
       return {
         date,
@@ -1254,6 +1461,7 @@ export const usePlatformStore = defineStore('platform', {
         chain: chainItem,
         frozen: frozenItems,
         stock: stockItems,
+        coupons: couponItems,
         openCount
       }
     },
@@ -1265,7 +1473,8 @@ export const usePlatformStore = defineStore('platform', {
         t: d.tasks.map((x) => x.claimId).sort(),
         c: d.chain ? 1 : 0,
         f: d.frozen.map((x) => `${x.key}:${x.expect}/${x.actual}`),
-        s: d.stock.filter((x) => x.diff !== 0).map((x) => `${x.targetType}:${x.targetId}:${x.diff}`)
+        s: d.stock.filter((x) => x.diff !== 0).map((x) => `${x.targetType}:${x.targetId}:${x.diff}`),
+        cp: d.coupons.map((x) => x.key).sort()
       })
     },
 
@@ -1310,7 +1519,7 @@ export const usePlatformStore = defineStore('platform', {
       this.addAuditLog('recon-run', bill.id,
         diffs.openCount === 0
           ? `业务日 ${d} 对账完成：账实相符，无差异（积分应有净额 ${diffs.points.expectedNet}，流水净额 ${diffs.points.ledgerNet}）`
-          : `业务日 ${d} 对账完成：发现 ${diffs.openCount} 项未平差异（积分残差 ${diffs.points.residual}、任务缺记 ${diffs.tasks.length} 笔、库存 ${diffs.stock.filter((x) => x.diff).length} SKU、冻结 ${diffs.frozen.length} 项${diffs.chain ? '、余额链断裂' : ''}）`)
+          : `业务日 ${d} 对账完成：发现 ${diffs.openCount} 项未平差异（积分残差 ${diffs.points.residual}、任务缺记 ${diffs.tasks.length} 笔、库存 ${diffs.stock.filter((x) => x.diff).length} SKU、冻结 ${diffs.frozen.length} 项、卡券 ${diffs.coupons.length} 项${diffs.chain ? '、余额链断裂' : ''}）`)
       if (!silent) {
         if (diffs.openCount === 0) this.showToast(`🧮 ${d} 对账完成：账实相符`, 'success')
         else this.showToast(`🧮 ${d} 对账完成：${diffs.openCount} 项差异待运营复核`, 'warn')
@@ -1397,17 +1606,38 @@ export const usePlatformStore = defineStore('platform', {
         actions.push({ type: 'stock', label: x.name, delta: -x.diff })
       })
 
+      // 4) 卡券账户：缺券按业务记录补发（append-only，issueCoupon 幂等防重）；
+      //    撤销单残留的有效券作废（冻结中的不自动处置，引导风控流程处理）
+      live2.coupons.forEach((item) => {
+        if (item.kind === 'missing') {
+          const rec = this.records.find((r) => r.id === item.recordId)
+          if (!rec) return
+          const cp = this.issueCoupon(rec, '对账补发')
+          if (cp) actions.push({ type: 'coupon', label: `补发卡券【${cp.name}】（${cp.code}）`, delta: 1 })
+        } else if (item.kind === 'stray' && item.autoFixable) {
+          const c = this.coupons.find((x) => x.id === item.couponId)
+          if (c && (c.status === 'active' || c.status === 'used')) {
+            c.status = 'void'
+            c.voidReason = `对账补偿：关联业务已撤销（${item.recordId}），卡券作废`
+            this.addAuditLog('coupon-void', c.id,
+              `对账补偿：业务记录已撤销，卡券【${c.name}】（${c.code}）作废`)
+            actions.push({ type: 'coupon', label: `作废残留卡券【${c.name}】（${c.code}）`, delta: -1 })
+          }
+        }
+      })
+
       if (!actions.length && !manualPoints && !live2.chain && !live2.frozen.length) {
         this.showToast('账目已平，无需重复补偿', 'info')
         return null
       }
 
-      const pointDelta = actions.filter((a) => a.type !== 'stock').reduce((s, a) => s + a.delta, 0)
+      const pointDelta = actions.filter((a) => a.type === 'task' || a.type === 'points').reduce((s, a) => s + a.delta, 0)
       const stockCount = actions.filter((a) => a.type === 'stock').length
+      const couponCount = actions.filter((a) => a.type === 'coupon').length
       if (actions.length) {
         bill0.compensations.unshift({
           id: genId('rcc'), at: `${this.todayDate} ${nowTime()}`,
-          pointDelta, stockCount, note: note.trim(), reviewer: this.user.name,
+          pointDelta, stockCount, couponCount, note: note.trim(), reviewer: this.user.name,
           items: actions.map((a) => ({ ...a }))
         })
       }
@@ -1415,7 +1645,9 @@ export const usePlatformStore = defineStore('platform', {
         `补偿业务日 ${date} 差异：` +
         actions.map((a) => a.type === 'stock'
           ? `库存【${a.label}】校正 ${a.delta > 0 ? '+' : ''}${a.delta}`
-          : `【${a.label}】补记 +${a.delta} 积分`).join('；') +
+          : a.type === 'coupon'
+            ? `卡券${a.label}`
+            : `【${a.label}】补记 +${a.delta} 积分`).join('；') +
         (manualPoints ? `；另有积分长款 ${manualPoints}（流水多记/来源不明），已标记需人工核查，未自动扣减` : '') +
         (live2.frozen.length ? `；${live2.frozen.length} 项冻结单据不一致需在风控申诉中处理` : '') +
         (note.trim() ? `；备注：${note.trim()}` : '') + '；原始记录保留未改写')
@@ -1428,9 +1660,10 @@ export const usePlatformStore = defineStore('platform', {
       const parts = []
       if (pointDelta) parts.push(`补记积分 +${pointDelta}`)
       if (stockCount) parts.push(`校正 ${stockCount} 项库存`)
+      if (couponCount) parts.push(`补发/作废 ${couponCount} 张卡券`)
       this.showToast(parts.length ? `🧮 补偿完成：${parts.join('，')}，余额与库存已同步` : '🧮 补偿已记录，剩余差异需人工处理',
         refreshed.diffs.openCount === 0 ? 'success' : 'warn')
-      return { pointDelta, stockCount, manualPoints, actions }
+      return { pointDelta, stockCount, couponCount, manualPoints, actions }
     },
 
     // ===== 演示用：注入账实差异（模拟漏记/盘亏，便于观察对账→复核→补偿闭环） =====
