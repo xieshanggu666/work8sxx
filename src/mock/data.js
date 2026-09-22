@@ -65,7 +65,7 @@ export const ACTIVITIES = [
     endAt: '2026-09-30',
     prizes: [
       { id: 'p1', name: '蓝牙耳机', rarity: 'legendary', stock: 5, remain: 5, weight: 1, emoji: '🎧', physical: true },
-      { id: 'p2', name: '视频月卡', rarity: 'epic', stock: 50, remain: 50, weight: 6, emoji: '🎬', physical: false },
+      { id: 'p2', name: '视频月卡', rarity: 'epic', stock: 50, remain: 50, weight: 6, emoji: '🎬', physical: false, couponId: 'c-video-month' },
       { id: 'p3', name: '20积分', rarity: 'rare', stock: 400, remain: 400, weight: 25, emoji: '🪙', physical: false },
       { id: 'p4', name: '5积分', rarity: 'common', stock: 800, remain: 800, weight: 50, emoji: '✨', physical: false },
       { id: 'p5', name: '谢谢参与', rarity: 'none', stock: 99999, remain: 99999, weight: 100, emoji: '🤝', physical: false }
@@ -85,10 +85,37 @@ export const TASKS = [
   { id: 't-invite', label: '邀请好友注册', reward: 50, icon: '🤝', type: 'once' }
 ]
 
-// 积分商城兑换商品（physical: 是否需要物流发货——实物填写收货信息、运营发货；虚拟券卡直接到账）
+// 卡券模板（中奖/兑换券类奖品或商品的核销凭证定义；库存仍挂在奖品/商品上，券账户按模板快照发券）
+// type: discount 满减券（threshold 门槛 + denomination 减免）| cash 代金券（denomination 面值）| voucher 兑换券（face 权益文案）
+// validityDays：自发券日（风控放行的以放行日为准）起的有效天数，到期当日 23:59 前可核销
+export const COUPON_TYPES = {
+  discount: { label: '满减券' },
+  cash: { label: '代金券' },
+  voucher: { label: '兑换券' }
+}
+export const COUPONS = [
+  {
+    id: 'c-discount-10', name: '满50减10优惠券', type: 'discount',
+    emoji: '🎟️', denomination: 10, threshold: 50, face: '', validityDays: 30,
+    desc: '全场满 50 元可用，单笔订单限用 1 张'
+  },
+  {
+    id: 'c-video-week', name: '视频会员周卡', type: 'voucher',
+    emoji: '🎬', denomination: 0, threshold: 0, face: '7天会员权益', validityDays: 15,
+    desc: '兑换后激活视频平台 7 天会员，核销时由运营录入开通账号'
+  },
+  {
+    id: 'c-video-month', name: '视频月卡', type: 'voucher',
+    emoji: '🎬', denomination: 0, threshold: 0, face: '30天会员权益', validityDays: 30,
+    desc: '兑换后激活视频平台 30 天会员，核销时由运营录入开通账号'
+  }
+]
+
+// 积分商城兑换商品（physical: 是否需要物流发货——实物填写收货信息、运营发货；
+// couponId: 券类虚拟商品——中奖/兑换发券至卡券账户，运营扫码核销；其余虚拟商品直接到账）
 export const SHOP_GOODS = [
-  { id: 'g1', name: '满50减10优惠券', cost: 30, icon: '🎟️', stock: 200, remain: 200, physical: false },
-  { id: 'g2', name: '视频会员周卡', cost: 80, icon: '🎬', stock: 100, remain: 100, physical: false },
+  { id: 'g1', name: '满50减10优惠券', cost: 30, icon: '🎟️', stock: 200, remain: 200, physical: false, couponId: 'c-discount-10' },
+  { id: 'g2', name: '视频会员周卡', cost: 80, icon: '🎬', stock: 100, remain: 100, physical: false, couponId: 'c-video-week' },
   { id: 'g3', name: '定制帆布袋', cost: 150, icon: '👜', stock: 50, remain: 50, physical: true },
   { id: 'g4', name: '盲盒福袋', cost: 200, icon: '🎁', stock: 30, remain: 30, physical: true },
   { id: 'g5', name: '与牛人共进午餐', cost: 500, icon: '🍽️', stock: 5, remain: 5, physical: false }

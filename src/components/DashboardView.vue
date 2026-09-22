@@ -92,6 +92,31 @@
         <div class="s-num muted">{{ store.dashboard.shipReceived }}</div>
         <div class="s-lab">已完成收货</div>
       </div>
+      <div class="stat-card coupon">
+        <span class="s-icon">🎟️</span>
+        <div class="s-num coupon-n">{{ store.dashboard.couponIssued }}</div>
+        <div class="s-lab">累计发券</div>
+      </div>
+      <div class="stat-card coupon">
+        <span class="s-icon">✅</span>
+        <div class="s-num" style="color:#ce93d8">{{ store.dashboard.couponAvailable }}</div>
+        <div class="s-lab">待核销卡券</div>
+      </div>
+      <div class="stat-card coupon">
+        <span class="s-icon">🎬</span>
+        <div class="s-num muted">{{ store.dashboard.couponRedeemed }}</div>
+        <div class="s-lab">已核销卡券</div>
+      </div>
+      <div class="stat-card coupon">
+        <span class="s-icon">⏰</span>
+        <div class="s-num" style="color:#ef9a9a">{{ store.dashboard.couponExpired }}</div>
+        <div class="s-lab">已过期卡券</div>
+      </div>
+      <div class="stat-card coupon">
+        <span class="s-icon">🧊</span>
+        <div class="s-num ice">{{ store.dashboard.couponHeld }}</div>
+        <div class="s-lab">券预占待交付</div>
+      </div>
     </div>
 
     <!-- 活动概览 + 库存 -->
@@ -137,6 +162,7 @@
         <span v-if="r.status==='frozen'" class="r-badge frozen">🧊 风控审核中</span>
         <span v-else-if="r.status==='released'" class="r-badge released">✅ 审核放行</span>
         <span v-else-if="r.status==='revoked'" class="r-badge revoked">❌ 已撤销</span>
+        <span v-if="couponOf(r.id)" class="r-badge coupon-b" :class="couponOf(r.id).status">🎟️ {{ couponMeta(couponOf(r.id).status).label }}</span>
         <span v-if="shipOf(r.id)" class="r-badge ship-b" :class="shipOf(r.id).status">📦 {{ shipMeta(shipOf(r.id).status).label }}</span>
         <span class="r-time">{{ r.date }} {{ r.time }}</span>
       </div>
@@ -145,7 +171,7 @@
 </template>
 
 <script setup>
-import { usePlatformStore, SHIP_STATUS } from '@/store/platform'
+import { usePlatformStore, SHIP_STATUS, COUPON_STATUS } from '@/store/platform'
 import { PRIZE_RARITY } from '@/mock/data'
 const store = usePlatformStore()
 const statusLabel = (s) => ({ running: '进行中', paused: '已暂停', ended: '已结束' }[s] || s)
@@ -153,6 +179,8 @@ const rarityLabel = (r) => PRIZE_RARITY[r]?.label || r
 const rarityColor = (r) => PRIZE_RARITY[r]?.color || '#777'
 const shipOf = (id) => store.shipmentOfRecord(id)
 const shipMeta = (s) => SHIP_STATUS[s] || { label: s }
+const couponOf = (id) => store.couponOfRecord(id)
+const couponMeta = (s) => COUPON_STATUS[s] || { label: s }
 </script>
 
 <style scoped>
@@ -169,7 +197,9 @@ const shipMeta = (s) => SHIP_STATUS[s] || { label: s }
 .stat-card.risk { border-color: rgba(255,152,0,0.35); }
 .stat-card.recon { border-color: rgba(77,182,172,0.35); }
 .stat-card.ship { border-color: rgba(76,175,80,0.35); }
+.stat-card.coupon { border-color: rgba(171,71,188,0.4); }
 .s-num.recon-n { color: #4db6ac; }
+.s-num.coupon-n { color: #ce93d8; }
 .s-num.warn { color: #ffb74d; }
 .s-num.ice { color: #81d4fa; }
 .s-num.ok { color: #7ef0c9; }
@@ -216,6 +246,9 @@ const shipMeta = (s) => SHIP_STATUS[s] || { label: s }
 .r-badge.ship-b.to_ship { background: rgba(66,165,245,0.15); color: #82b1ff; }
 .r-badge.ship-b.shipped { background: rgba(76,175,80,0.15); color: #7ef0c9; }
 .r-badge.ship-b.received { background: rgba(144,164,174,0.15); color: #b0bec5; }
+.r-badge.coupon-b.available { background: rgba(171,71,188,0.2); color: #ce93d8; }
+.r-badge.coupon-b.redeemed { background: rgba(144,164,174,0.15); color: #b0bec5; }
+.r-badge.coupon-b.expired { background: rgba(84,110,123,0.25); color: #90a4ae; }
 .rec-row {
   display: flex; align-items: center; gap: 10px; padding: 7px 0;
   border-bottom: 1px dashed rgba(120,160,220,0.1); font-size: 12px;

@@ -10,7 +10,8 @@
           <div class="p-info">
             <div class="p-name">{{ p.name }}
               <span class="p-rarity" :style="{ background: rarityColor(p.rarity) }">{{ rarityLabel(p.rarity) }}</span>
-              <span v-if="p.rarity !== 'none'" class="p-kind" :class="isPhysical(p) ? 'physical' : 'virtual'">{{ isPhysical(p) ? '实物' : '虚拟' }}</span>
+              <span v-if="p.couponId" class="p-kind coupon">券·核销</span>
+              <span v-else class="p-kind" :class="isPhysical(p) ? 'physical' : 'virtual'">{{ isPhysical(p) ? '实物' : '虚拟' }}</span>
             </div>
             <div class="p-stock">库存{{ p.remain }}/<s>{{ p.stock }}</s></div>
           </div>
@@ -180,6 +181,7 @@ watch(() => props.activity.id, () => {
 .p-kind { font-size: 9px; padding: 1px 5px; border-radius: 3px; }
 .p-kind.physical { background: rgba(76,175,80,0.2); color: #a5d6a7; }
 .p-kind.virtual { background: rgba(120,160,220,0.14); color: #8ba2c8; }
+.p-kind.coupon { background: rgba(171,71,188,0.25); color: #ce93d8; }
 .p-stock { font-size: 10px; color: #6f84ab; margin-top: 2px; }
 
 .sub-none { color: #8a9baf; }

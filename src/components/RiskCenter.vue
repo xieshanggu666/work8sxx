@@ -116,6 +116,7 @@
           <span v-for="r in o.rules" :key="r.code" class="risk-tag">⚡ {{ r.label }}</span>
           <span class="hold-tag">🪙 冻结积分 {{ o.frozenPoints }}</span>
           <span v-if="o.stockHeld" class="hold-tag">📦 预占库存 ×{{ o.stockHeld }}</span>
+          <span v-if="isCouponOrder(o)" class="hold-tag coupon">🎟️ 券类：{{ o.status === 'released' ? '已放行发券交付' : o.status === 'revoked' ? '已释放（券未发放）' : '预占中，放行后发券' }}</span>
         </div>
 
         <!-- 抽奖单：任务进度归属说明（跨日审核不串账） -->
@@ -183,6 +184,9 @@ import { usePlatformStore, RISK_STATUS, SHIP_STATUS } from '@/store/platform'
 import { PRIZE_RARITY } from '@/mock/data'
 
 const store = usePlatformStore()
+
+// 风控单是否关联券类（券在冻结期仅预占，放行才发券交付、撤销则释放）
+const isCouponOrder = (o) => !!store.records.find((r) => r.id === o.recordId)?.couponId
 
 const filters = [
   { key: 'all', label: '全部' },
@@ -363,6 +367,7 @@ function doRevoke(o) {
   font-size: 10px; background: rgba(129,212,250,0.12); color: #81d4fa;
   border: 1px solid rgba(129,212,250,0.25); padding: 2px 8px; border-radius: 5px;
 }
+.hold-tag.coupon { background: rgba(171,71,188,0.16); color: #ce93d8; border-color: rgba(171,71,188,0.35); }
 .o-hint {
   margin-top: 9px; font-size: 11px; color: #9db0d0; line-height: 1.5;
   background: rgba(129,212,250,0.06); border: 1px dashed rgba(129,212,250,0.25);

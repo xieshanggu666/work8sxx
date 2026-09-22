@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia'
-import { ACTIVITIES, TASKS, SHOP_GOODS, DEMO_USER, DEFAULT_RISK_RULES } from '@/mock/data'
+import { ACTIVITIES, TASKS, SHOP_GOODS, DEMO_USER, DEFAULT_RISK_RULES, COUPONS, COUPON_TYPES } from '@/mock/data'
 
 // 加权随机抽取（按权重选一个奖品下标）
 function drawByWeight(prizes) {
@@ -61,6 +61,15 @@ export const SHIP_STATUS = {
   received: { label: '已收货', tone: 'muted' }
 }
 
+// 卡券账户实例状态文案与样式标记
+// available 待核销（发券即入账）→ redeemed 已核销（运营扫码核销）/ expired 已过期（到期扫描）
+// 风控冻结期不生成券账户实例（库存预占）：放行后发券交付，撤销则库存回补、券始终不发出
+export const COUPON_STATUS = {
+  available: { label: '待核销', tone: 'ok' },
+  redeemed: { label: '已核销', tone: 'muted' },
+  expired: { label: '已过期', tone: 'bad' }
+}
+
 let seq = 0
 const genId = (p) => `${p}-${Date.now()}-${seq++}`
 
@@ -80,6 +89,8 @@ export const usePlatformStore = defineStore('platform', {
     auditLogs: [],              // 操作记录（审计日志）
     reconBills: [],             // 积分库存对账差异单（按业务日，append-only 保留执行/复核/补偿痕迹）
     stockAdjustments: [],       // 库存校正台账（append-only）：对账补偿对 remain 的修正凭证
+    coupons: [],                // 卡券账户实例（append-only）：{ status: available|redeemed|expired, code 唯一券码, recordId 业务记录 }
+    couponLogs: [],             // 卡券业务台账（append-only 核销/发券留痕）：issue/hold/deliver/release/redeem/expire/revoke/comp
     riskRules: { ...DEFAULT_RISK_RULES, blacklist: [...DEFAULT_RISK_RULES.blacklist] },
     todayDate: todayStr(),
     activeTab: 'home',
@@ -195,7 +206,13 @@ export const usePlatformStore = defineStore('platform', {
         shipPendingAddress: state.shipments.filter((o) => o.status === 'pending_address').length,
         shipToShip: state.shipments.filter((o) => o.status === 'to_ship').length,
         shipShipped: state.shipments.filter((o) => o.status === 'shipped').length,
-        shipReceived: state.shipments.filter((o) => o.status === 'received').length
+        shipReceived: state.shipments.filter((o) => o.status === 'received').length,
+        // 卡券看板：累计发券 / 待核销 / 已核销 / 已过期 / 风控预占待交付
+        couponIssued: state.coupons.length,
+        couponAvailable: state.coupons.filter((c) => c.status === 'available').length,
+        couponRedeemed: state.coupons.filter((c) => c.status === 'redeemed').length,
+        couponExpired: state.coupons.filter((c) => c.status === 'expired').length,
+        couponHeld: state.records.filter((r) => r.status === 'frozen' && r.couponId).length
       }
     },
     // 某业务日的对账差异单（一业务日一单，重复执行更新同单并保留痕迹）
@@ -243,6 +260,51 @@ export const usePlatformStore = defineStore('platform', {
         shipped: list.filter((o) => o.status === 'shipped').length,
         received: list.filter((o) => o.status === 'received').length
       }
+    },
+    // ===== 卡券账户 =====
+    // 卡券模板（按 id 索引）
+    couponTpls: () => COUPONS.reduce((m, c) => { m[c.id] = c; return m }, {}),
+    // 某奖品/商品是否为券类（券类在中奖/兑换有效后发券至卡券账户，不产生发货单）
+    couponOfTarget: (s) => (rec) => {
+      const id = rec.type === 'draw' ? rec.couponId : rec.couponId
+      if (!id) return null
+      return s.couponTpls[id] || null
+    },
+    // 业务记录对应的卡券实例（一条有效券业务记录至多一张券，与发货单同理）
+    couponOfRecord: (s) => (recordId) => s.coupons.find((c) => c.recordId === recordId) || null,
+    // 当前用户的卡券账户（最新在前）
+    myCoupons(s) {
+      return [...s.coupons]
+        .filter((c) => c.userId === s.user.id)
+        .sort((a, b) => b.ts - a.ts)
+    },
+    // 风控冻结中、待放行交付的券（预占：库存已扣，券尚未发至账户）
+    myHeldCoupons(s) {
+      return s.records
+        .filter((r) => r.status === 'frozen' && r.couponId && (r.userId || s.user.id) === s.user.id)
+        .sort((a, b) => b.ts - a.ts)
+    },
+    // 用户卡券待办角标：待核销（含今日即将到期的提示由组件推导）
+    myCouponTodoCount(s) {
+      return s.coupons.filter((c) => c.userId === s.user.id && c.status === 'available').length
+    },
+    // 运营待核销券数（全部用户待核销券）——运营 Tab 角标
+    pendingRedeemCount(s) {
+      return s.coupons.filter((c) => c.status === 'available').length
+    },
+    // 卡券看板统计
+    couponStats(s) {
+      const list = s.coupons
+      const now = Date.now()
+      const todayEnd = (() => { const d = new Date(); d.setHours(23, 59, 59, 999); return d.getTime() })()
+      return {
+        issued: list.length,
+        available: list.filter((c) => c.status === 'available').length,
+        redeemed: list.filter((c) => c.status === 'redeemed').length,
+        expired: list.filter((c) => c.status === 'expired').length,
+        held: s.records.filter((r) => r.status === 'frozen' && r.couponId).length,
+        expiringToday: list.filter((c) => c.status === 'available' && c.expireTs <= todayEnd && c.expireTs >= now).length
+      }
     }
   },
 
@@ -270,6 +332,8 @@ export const usePlatformStore = defineStore('platform', {
     //  - 刷新 todayDate：每日限抽、风控当日频次从新日期起算
     //  - 保留累计抽奖次数、积分余额/流水，以及审核中（pending/appealed）单据的冻结积分与预占库存，支持跨日审核
     syncBusinessDay(showHint = false) {
+      // 先做卡券到期扫描（每个业务动作都经过本入口，保证出示/核销前已过期券状态已流转）
+      this.sweepCouponExpiry(true)
       const current = todayStr()
       if (current === this.todayDate) return false
       const prev = this.todayDate
@@ -334,7 +398,9 @@ export const usePlatformStore = defineStore('platform', {
         date: extra.date || this.todayDate,
         bizDate: extra.bizDate || extra.date || this.todayDate,
         time: extra.time || nowTime(),
-        ts: extra.ts || chainTs,
+        // 即使调用方显式指定 ts（种子/压测脚本），也强制严格晚于现有链尾：
+        // 历史时间戳落在当前挂钟"未来"（种子按今天固定时刻构造）时，后记账不能排到链首，否则余额快照链断裂
+        ts: extra.ts ? Math.max(extra.ts, latestTs + 1) : chainTs,
         delta,
         // 余额快照：调用方先改 this.points 再记账，快照即记账后余额
         balance: extra.balance !== undefined ? extra.balance : this.points,
@@ -370,7 +436,14 @@ export const usePlatformStore = defineStore('platform', {
           'ship-create': '生成发货单',
           'ship-address': '填写收货信息',
           'ship-send': '运营发货',
-          'ship-receive': '确认收货'
+          'ship-receive': '确认收货',
+          'coupon-issue': '卡券发放',
+          'coupon-hold': '卡券预占',
+          'coupon-deliver': '放行发券',
+          'coupon-release': '预占释放',
+          'coupon-redeem': '卡券核销',
+          'coupon-expire': '卡券到期',
+          'coupon-comp': '卡券补券'
         }[action] || action,
         orderId: orderId || '',
         operator: this.role === 'operator' ? `运营(${this.user.name})` : this.user.name,
@@ -532,13 +605,17 @@ export const usePlatformStore = defineStore('platform', {
         prizeId: prize.id,
         prizeName: prize.name,
         rarity: prize.rarity,
+        couponId: prize.couponId || '',
         icon: prize.emoji
       }
       this.records.unshift(rec)
       if (pointDelta) this.addPointRecord(pointDelta, `抽奖获得：${prize.name}`, 'reward')
-      // 实物奖品：生成发货单，引导用户填写收货信息（积分奖品/谢谢参与不涉及物流）
+      // 券类奖品：发券至卡券账户（唯一券码，用户出示、运营核销）；实物奖品生成发货单
+      const coupon = this.issueCouponForRecord(rec)
+      // 实物奖品：生成发货单，引导用户填写收货信息（积分奖品/券/谢谢参与不涉及物流）
       const ship = this.createShipment(rec)
-      if (ship) this.showToast(`🎉 获得实物：${prize.name}，请前往「物流发货」填写收货信息`, 'success')
+      if (coupon) this.showToast(`🎟️ 获得卡券【${coupon.name}】，券码已发至「卡券核销」，有效期至 ${coupon.expireDate}`, 'success')
+      else if (ship) this.showToast(`🎉 获得实物：${prize.name}，请前往「物流发货」填写收货信息`, 'success')
       else if (prize.rarity === 'legendary') this.showToast(`🎉 传说大奖！${prize.name}`, 'success')
       else this.showToast(`获得：${prize.name}`, 'success')
       // 真实参与记录落账后，按归属业务日自动结算抽奖任务（达标即发奖，幂等防重）
@@ -569,6 +646,7 @@ export const usePlatformStore = defineStore('platform', {
         prizeId: prize.id,
         prizeName: prize.name,
         rarity: prize.rarity,
+        couponId: prize.couponId || '',
         icon: prize.emoji
       }
       this.records.unshift(rec)
@@ -585,6 +663,7 @@ export const usePlatformStore = defineStore('platform', {
         riskHits
       })
       rec.riskOrderId = order.id
+      if (prize.couponId) this.addCouponLog('hold', null, rec, { orderId: order.id })
       this.showToast('⚠️ 该次抽奖触发风控，奖品与积分已冻结，审核通过前不计入抽奖任务进度；可在「风控申诉」中查看/申诉', 'warn')
       return rec
     },
@@ -649,12 +728,15 @@ export const usePlatformStore = defineStore('platform', {
         ts: Date.now(),
         goodsId: g.id,
         goodsName: g.name,
+        couponId: g.couponId || '',
         icon: g.icon
       }
       this.records.unshift(rec)
-      // 实物商品：生成发货单，引导用户填写收货信息（虚拟券卡直接到账）
+      // 券类商品：发券至卡券账户；实物商品生成发货单（其余虚拟权益直接到账）
+      const coupon = this.issueCouponForRecord(rec)
       const ship = this.createShipment(rec)
-      if (ship) this.showToast(`兑换成功：${g.name}，请前往「物流发货」填写收货信息`, 'success')
+      if (coupon) this.showToast(`🎟️ 兑换成功：${g.name}，券码已发至「卡券核销」，有效期至 ${coupon.expireDate}`, 'success')
+      else if (ship) this.showToast(`兑换成功：${g.name}，请前往「物流发货」填写收货信息`, 'success')
       else this.showToast(`兑换成功：${g.name}`, 'success')
       return rec
     },
@@ -674,6 +756,7 @@ export const usePlatformStore = defineStore('platform', {
         ts: Date.now(),
         goodsId: g.id,
         goodsName: g.name,
+        couponId: g.couponId || '',
         icon: g.icon
       }
       this.records.unshift(rec)
@@ -688,6 +771,7 @@ export const usePlatformStore = defineStore('platform', {
         riskHits
       })
       rec.riskOrderId = order.id
+      if (g.couponId) this.addCouponLog('hold', null, rec, { orderId: order.id })
       this.showToast('⚠️ 该笔兑换触发风控，积分与商品已冻结，可在「风控申诉」中查看/申诉', 'warn')
       return rec
     },
@@ -799,11 +883,15 @@ export const usePlatformStore = defineStore('platform', {
       rec.status = 'released'
       this.addAuditLog('release', o.id,
         `放行${o.bizType === 'draw' ? '抽奖' : '兑换'}【${o.targetName}】${note ? '；备注：' + note : ''}`)
+      // 放行后券类才"交付"：发券至卡券账户（冻结期仅预占库存、未发券）；实物则生成发货单
+      const coupon = this.issueCouponForRecord(rec, { orderId: o.id, source: '风控放行' })
       // 放行后实物才"发奖"：生成发货单并通知用户填写收货信息（冻结期间不产生发货单）
       const ship = this.createShipment(rec)
-      this.showToast(ship
-        ? `已放行【${o.targetName}】，发货单已生成，等待用户填写收货信息`
-        : `已放行【${o.targetName}】`, 'success')
+      this.showToast(coupon
+        ? `已放行【${o.targetName}】，券码已发至卡券账户（有效期自放行日起算）`
+        : ship
+          ? `已放行【${o.targetName}】，发货单已生成，等待用户填写收货信息`
+          : `已放行【${o.targetName}】`, 'success')
       // 抽奖放行后按记录归属业务日补计任务进度（跨日审核不串当日账，幂等防重复发奖）
       if (o.bizType === 'draw') this.settleDrawTasks(rec.date)
     },
@@ -856,8 +944,10 @@ export const usePlatformStore = defineStore('platform', {
       o.reviewer = this.user.name
       o.reviewedAt = `${this.todayDate} ${nowTime()}`
       rec.status = 'revoked'
+      // 券类预占释放：冻结期未发券，撤销后券始终不存在；库存回补由下方统一处理
+      if (rec.couponId) this.addCouponLog('revoke', null, rec, { orderId: o.id })
       this.addAuditLog('revoke', o.id,
-        `撤销${o.bizType === 'draw' ? '抽奖' : '兑换'}【${o.targetName}】，返还${o.frozenPoints}积分${o.stockHeld ? `、回补库存×${o.stockHeld}` : ''}${o.bizType === 'draw' ? '；该笔不计入抽奖任务进度（冻结期间暂缓，撤销后确认回退）' : ''}${note ? '；备注：' + note : ''}`)
+        `撤销${o.bizType === 'draw' ? '抽奖' : '兑换'}【${o.targetName}】，返还${o.frozenPoints}积分${o.stockHeld ? `、回补库存×${o.stockHeld}` : ''}${rec.couponId ? '、释放预占券（未发放）' : ''}${o.bizType === 'draw' ? '；该笔不计入抽奖任务进度（冻结期间暂缓，撤销后确认回退）' : ''}${note ? '；备注：' + note : ''}`)
       this.showToast(`已撤销【${o.targetName}】，积分与库存已返还`, 'info')
     },
 
@@ -866,6 +956,8 @@ export const usePlatformStore = defineStore('platform', {
     // 仅"有效"实物业务记录（正常落账 normal / 风控放行 released）生成发货单；
     // 风控冻结中不生成（放行才发奖）、撤销作废不生成（已返还库存/积分）。
     _isPhysicalRecord(rec) {
+      // 券类一律走卡券账户核销，不走物流
+      if (rec.couponId) return false
       if (rec.type === 'draw') {
         if (rec.rarity === 'none') return false
         const prize = this.activities.find((a) => a.id === rec.activityId)
@@ -989,6 +1081,208 @@ export const usePlatformStore = defineStore('platform', {
         `确认收货【${o.targetName}】（${o.carrier} ${o.trackingNo}），订单完成`)
       this.showToast(`✅ 已确认收货：${o.targetName}`, 'success')
       return true
+    },
+
+    // ===== 卡券账户与核销 =====
+    // 生命周期：中奖/兑换有效后发券（issue）；风控冻结时只预占库存（hold，不发券），
+    //          放行后交付发券（deliver），撤销释放预占（revoke，券从未发出）；
+    //          用户出示券码、运营扫码/输码核销（redeem）；到期自动失效（expire）。
+    // 券码全局唯一；状态机保证重复核销、过期核销被拦截；券实例、卡券台账 append-only。
+
+    // 卡券业务台账（append-only，核销/发券留痕，不裁剪）
+    addCouponLog(action, couponId, rec, extra = {}) {
+      const tpl = rec?.couponId ? (this.couponTpls[rec.couponId] || null) : null
+      const log = {
+        id: genId('cl'),
+        action,                                 // issue | hold | deliver | revoke | redeem | expire | comp
+        actionLabel: {
+          issue: '卡券发放', hold: '风控预占', deliver: '放行交付', revoke: '撤销释放',
+          redeem: '卡券核销', expire: '到期失效', comp: '对账补券'
+        }[action] || action,
+        couponId: couponId || '',
+        code: extra.code || '',
+        tplId: rec?.couponId || extra.tplId || '',
+        tplName: tpl?.name || extra.tplName || rec?.prizeName || rec?.goodsName || '',
+        recordId: rec?.id || extra.recordId || '',
+        bizType: rec?.type || extra.bizType || '',
+        orderId: extra.orderId || '',
+        operator: this.role === 'operator' ? `运营(${this.user.name})` : (extra.operator || this.user.name),
+        note: extra.note || '',
+        date: this.todayDate,
+        time: nowTime(),
+        ts: Date.now()
+      }
+      this.couponLogs.unshift(log)
+      if (this.couponLogs.length > 300) this.couponLogs.pop()
+      return log
+    },
+
+    // 生成全局唯一券码（大写字母+数字，剔除易混字符；碰撞重取）
+    _genCouponCode() {
+      const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
+      for (let i = 0; i < 10; i++) {
+        let body = ''
+        for (let j = 0; j < 10; j++) body += chars[Math.floor(Math.random() * chars.length)]
+        const code = `CP-${body.slice(0, 5)}-${body.slice(5)}`
+        if (!this.coupons.some((c) => c.code === code)) return code
+      }
+      return `CP-${genId('x').toUpperCase()}`
+    },
+
+    // 券码归一化：去空白/横杠后比较，容忍用户输入空格、小写、连字符
+    _normCode(code) {
+      return String(code || '').replace(/[\s-]/g, '').toUpperCase()
+    },
+
+    // 按券码查券实例（归一化匹配）
+    couponByCode(code) {
+      const key = this._normCode(code)
+      if (!key) return null
+      return this.coupons.find((c) => this._normCode(c.code) === key) || null
+    },
+
+    // 计算有效期（自指定业务日起 validityDays 天，到期日 23:59:59.999）
+    _couponExpiry(tpl, fromDate) {
+      const d = new Date(`${fromDate} 00:00:00`)
+      d.setDate(d.getDate() + Math.max(0, (tpl.validityDays || 30) - 1))
+      d.setHours(23, 59, 59, 999)
+      const m = String(d.getMonth() + 1).padStart(2, '0')
+      const day = String(d.getDate()).padStart(2, '0')
+      return { ts: d.getTime(), date: `${d.getFullYear()}-${m}-${day}` }
+    },
+
+    // 有效业务记录（normal/released）发券至卡券账户；幂等：一条业务记录至多一张券。
+    // 风控放行交付时有效期以放行日（今日）起算；正常中奖/兑换以当日起算。
+    issueCouponForRecord(rec, opts = {}) {
+      if (!rec) return null
+      if (rec.status !== 'normal' && rec.status !== 'released') return null
+      if (!rec.couponId) return null
+      if (this.coupons.some((c) => c.recordId === rec.id)) return null
+      const tpl = this.couponTpls[rec.couponId]
+      if (!tpl) return null
+      const isDraw = rec.type === 'draw'
+      const exp = this._couponExpiry(tpl, this.todayDate)
+      const coupon = {
+        id: genId('cp'),
+        code: this._genCouponCode(),
+        tplId: tpl.id,
+        name: tpl.name,
+        type: tpl.type,
+        typeLabel: COUPON_TYPES[tpl.type]?.label || tpl.type,
+        emoji: tpl.emoji,
+        denomination: tpl.denomination || 0,
+        threshold: tpl.threshold || 0,
+        face: tpl.face || '',
+        desc: tpl.desc || '',
+        validityDays: tpl.validityDays || 30,
+        status: 'available',                // available | redeemed | expired
+        userId: rec.userId || this.user.id,
+        userName: rec.userName || this.user.name,
+        recordId: rec.id,
+        bizType: rec.type,
+        activityId: isDraw ? rec.activityId : null,
+        source: opts.source || (rec.status === 'released' ? '风控放行' : (isDraw ? '中奖' : '积分兑换')),
+        issueDate: this.todayDate,
+        time: nowTime(),
+        ts: Date.now(),
+        expireDate: exp.date,
+        expireTs: exp.ts,
+        // 核销信息（运营核销时补全）
+        redeemedAt: '', redeemOperator: '', redeemChannel: (opts.channel || '到店扫码'), redeemNote: '',
+        // 补券标记（对账补记时关联差异单）
+        compensateBillId: opts.compensateBillId || '',
+        comp: !!opts.compensateBillId
+      }
+      this.coupons.unshift(coupon)
+      const action = coupon.source === '风控放行' ? 'deliver' : 'issue'
+      this.addCouponLog(action, coupon.id, rec, { code: coupon.code, orderId: opts.orderId || rec.riskOrderId || '' })
+      this.addAuditLog(
+        action === 'deliver' ? 'coupon-deliver' : 'coupon-issue',
+        rec.riskOrderId || '',
+        `发放卡券【${tpl.name}】（券码 ${coupon.code}，有效期至 ${exp.date}）：${isDraw ? `抽奖中奖【${rec.prizeName}】` : `积分兑换【${rec.goodsName}】`}${action === 'deliver' ? '，风控放行后交付（有效期自放行日起算）' : ''}`
+      )
+      return coupon
+    },
+
+    // 到期扫描：过期 available 券批量流转为 expired（幂等：只处理仍可用且到期的券）
+    // 任何业务动作与运营核销前都会先经 syncBusinessDay 调用，杜绝出示/核销已过期券。
+    sweepCouponExpiry(silent = false) {
+      const now = Date.now()
+      const due = this.coupons.filter((c) => c.status === 'available' && c.expireTs < now)
+      if (!due.length) return 0
+      due.forEach((c) => {
+        c.status = 'expired'
+        const rec = this.records.find((r) => r.id === c.recordId) || null
+        this.addCouponLog('expire', c.id, rec, { code: c.code, tplId: c.tplId, tplName: c.name })
+      })
+      this.addAuditLog('coupon-expire', null,
+        `卡券到期扫描：${due.length} 张券已过期失效（${due.map((c) => `${c.name} ${c.code}`).join('；')}）`)
+      if (!silent) this.showToast(`⏰ ${due.length} 张卡券已到期，自动标记为已过期`, 'info')
+      return due.length
+    },
+
+    // 运营按券码核销：校验归属/状态/有效期，状态机幂等防重复核销
+    redeemCoupon(code, form = {}) {
+      this.syncBusinessDay() // 核销前先做到期流转
+      if (this.role !== 'operator') {
+        this.showToast('仅运营可核销卡券，请切换到运营视角', 'warn')
+        return null
+      }
+      const c = this.couponByCode(code)
+      if (!c) {
+        this.showToast('券码不存在，请核对后重试', 'warn')
+        return null
+      }
+      if (c.status === 'redeemed') {
+        this.showToast(`该券码已核销（${c.redeemedAt}，核销人 ${c.redeemOperator}），请勿重复核销`, 'warn')
+        return { duplicated: true, coupon: c }
+      }
+      if (c.status === 'expired' || c.expireTs < Date.now()) {
+        // 双重保险：到期扫描未覆盖到（如系统时钟跳变）也不允许核销
+        if (c.status !== 'expired') {
+          c.status = 'expired'
+          const rec = this.records.find((r) => r.id === c.recordId) || null
+          this.addCouponLog('expire', c.id, rec, { code: c.code, tplId: c.tplId, tplName: c.name })
+        }
+        this.showToast(`该券已于 ${c.expireDate} 到期，无法核销`, 'warn')
+        return { expired: true, coupon: c }
+      }
+      const note = (form.note || '').trim()
+      const channel = (form.channel || '到店扫码').trim() || '到店扫码'
+      c.status = 'redeemed'
+      c.redeemedAt = `${this.todayDate} ${nowTime()}`
+      c.redeemOperator = this.user.name
+      c.redeemChannel = channel
+      c.redeemNote = note
+      const rec = this.records.find((r) => r.id === c.recordId) || null
+      this.addCouponLog('redeem', c.id, rec, { code: c.code, note: note ? `${channel}：${note}` : channel })
+      this.addAuditLog('coupon-redeem', '',
+        `核销卡券【${c.name}】券码 ${c.code}（用户 ${c.userName}，渠道 ${channel}，有效期至 ${c.expireDate}）${note ? '；备注：' + note : ''}`)
+      this.showToast(`✅ 核销成功：${c.name}（${c.code}）`, 'success')
+      return { coupon: c }
+    },
+
+    // 演示注入：让一笔已发券在账户中"凭空消失"（业务记录在、券账户漏发），由 P6 检出并补券。
+    // 稳定选取满减券类（与库存注入固定选 g1 同理），优先种子券、其次任意待核销满减券。
+    injectCouponGap() {
+      this.syncBusinessDay()
+      const d = this.todayDate
+      if (this.couponLogs.some((l) => l.action === 'comp' && l.date === d)) {
+        this.showToast('今日已注入过卡券漏发差异，请勿重复注入', 'warn')
+        return
+      }
+      const c = this.coupons.find((x) => x.status === 'available' && x.tplId === 'c-discount-10')
+        || this.coupons.find((x) => x.status === 'available')
+      if (!c) { this.showToast('当前没有待核销券，无法注入漏发差异', 'warn'); return }
+      const rec = this.records.find((r) => r.id === c.recordId) || null
+      const removedName = c.name
+      const removedRecordId = c.recordId
+      this.coupons = this.coupons.filter((x) => x.id !== c.id)
+      // 登记一条注入痕迹（区别于真实补券：带 inject 标记，不写 coupon 实例）
+      this.addCouponLog('revoke', '', rec, { tplId: c.tplId, tplName: c.name, note: '【演示注入】券账户漏发：业务记录有效、券实例缺失' })
+      this.addAuditLog('recon-inject', '',
+        `【演示注入】${d} 卡券【${removedName}】业务记录 ${removedRecordId} 有效但券账户实例漏发，等待 P6 对账检出`)
+      this.showToast(`🔧 已注入演示差异：卡券【${removedName}】账户漏发（业务记录在、券缺失）`, 'warn')
     },
 
     // 更新风控规则（仅运营）
@@ -1241,10 +1535,76 @@ export const usePlatformStore = defineStore('platform', {
       }))
       this.goods.forEach((g) => pushStock('goods', null, g.id, g.name, g.icon, g))
 
+      // —— P6 卡券账户勾稽（按业务日发券 + 当前态） ——
+      // 1) 有效券业务记录（normal/released 且 couponId）当日必须有券实例；撤销/冻结不得有券（漏发可补券）
+      // 2) 券实例必须能回指一条有效业务记录（孤立券人工核查，不自动作废）
+      // 3) 券码全局唯一（重复码严重异常，人工核查）
+      // 4) 已核销券必须有核销人/核销时间；已过期但仍可用的券为到期未流转（可自动修复）
+      const couponItems = []
+      const couponById = new Map(this.coupons.map((c) => [c.id, c]))
+      // 1) 漏发：按业务记录
+      this.records
+        .filter((r) => r.couponId && (r.status === 'normal' || r.status === 'released') &&
+          (r.status === 'released' ? this._reviewDate(this._orderOfRecord(r.id)) === date : r.date === date))
+        .forEach((r) => {
+          const c = this.coupons.find((x) => x.recordId === r.id)
+          const tpl = this.couponTpls[r.couponId]
+          if (!c) {
+            couponItems.push({
+              key: `cp-missing-${r.id}`, kind: 'missing', recordId: r.id,
+              target: r.type === 'draw' ? r.prizeName : r.goodsName,
+              tplId: r.couponId, bizType: r.type,
+              expect: '有效业务记录应发券', actual: '券账户无实例', autoFixable: true
+            })
+          }
+        })
+      // 2) 孤立券 / 3) 重复码 / 4) 核销信息缺失、到期未流转（当前态，仅计入当日单避免每日重复列示）
+      if (date === this.todayDate) {
+        this.coupons.forEach((c) => {
+          const rec = this.records.find((r) => r.id === c.recordId)
+          if (!rec || rec.status === 'revoked' || rec.status === 'frozen') {
+            couponItems.push({
+              key: `cp-orphan-${c.id}`, kind: 'orphan', couponId: c.id, code: c.code,
+              target: c.name, expect: '券应回指有效业务记录',
+              actual: !rec ? '业务记录缺失' : `业务记录状态 ${rec.status}`, autoFixable: false
+            })
+          }
+          if (c.status === 'redeemed' && (!c.redeemedAt || !c.redeemOperator)) {
+            couponItems.push({
+              key: `cp-redeem-${c.id}`, kind: 'redeem-info', couponId: c.id, code: c.code,
+              target: c.name, expect: '已核销应有核销人/时间', actual: '核销信息不完整', autoFixable: false
+            })
+          }
+        })
+        const codeMap = new Map()
+        this.coupons.forEach((c) => {
+          const k = this._normCode(c.code)
+          if (!codeMap.has(k)) codeMap.set(k, [])
+          codeMap.get(k).push(c)
+        })
+        codeMap.forEach((list, k) => {
+          if (k && list.length > 1) {
+            couponItems.push({
+              key: `cp-dup-${k}`, kind: 'duplicate', code: k, target: list[0].name,
+              expect: '券码全局唯一', actual: `${list.length} 张券同码`, autoFixable: false
+            })
+          }
+        })
+        // 到期未流转：券状态仍 available 但已过到期时刻（正常应由 sweepCouponExpiry 自动处理）
+        const now = Date.now()
+        this.coupons.filter((c) => c.status === 'available' && c.expireTs < now).forEach((c) => {
+          couponItems.push({
+            key: `cp-expire-${c.id}`, kind: 'expired-pending', couponId: c.id, code: c.code,
+            target: c.name, expect: `已于 ${c.expireDate} 到期`, actual: '账户仍标记待核销', autoFixable: true
+          })
+        })
+      }
+
       const taskOpen = taskItems.length
       const stockOpen = stockItems.filter((x) => x.diff !== 0).length
+      const couponOpen = couponItems.length
       const openCount = (pointsResidual !== 0 ? 1 : 0) + taskOpen + (chainItem ? 1 : 0) +
-        frozenItems.length + stockOpen
+        frozenItems.length + stockOpen + couponOpen
 
       return {
         date,
@@ -1254,6 +1614,7 @@ export const usePlatformStore = defineStore('platform', {
         chain: chainItem,
         frozen: frozenItems,
         stock: stockItems,
+        coupons: couponItems,
         openCount
       }
     },
@@ -1265,7 +1626,8 @@ export const usePlatformStore = defineStore('platform', {
         t: d.tasks.map((x) => x.claimId).sort(),
         c: d.chain ? 1 : 0,
         f: d.frozen.map((x) => `${x.key}:${x.expect}/${x.actual}`),
-        s: d.stock.filter((x) => x.diff !== 0).map((x) => `${x.targetType}:${x.targetId}:${x.diff}`)
+        s: d.stock.filter((x) => x.diff !== 0).map((x) => `${x.targetType}:${x.targetId}:${x.diff}`),
+        cp: (d.coupons || []).map((x) => `${x.key}`).sort()
       })
     },
 
@@ -1310,7 +1672,7 @@ export const usePlatformStore = defineStore('platform', {
       this.addAuditLog('recon-run', bill.id,
         diffs.openCount === 0
           ? `业务日 ${d} 对账完成：账实相符，无差异（积分应有净额 ${diffs.points.expectedNet}，流水净额 ${diffs.points.ledgerNet}）`
-          : `业务日 ${d} 对账完成：发现 ${diffs.openCount} 项未平差异（积分残差 ${diffs.points.residual}、任务缺记 ${diffs.tasks.length} 笔、库存 ${diffs.stock.filter((x) => x.diff).length} SKU、冻结 ${diffs.frozen.length} 项${diffs.chain ? '、余额链断裂' : ''}）`)
+          : `业务日 ${d} 对账完成：发现 ${diffs.openCount} 项未平差异（积分残差 ${diffs.points.residual}、任务缺记 ${diffs.tasks.length} 笔、库存 ${diffs.stock.filter((x) => x.diff).length} SKU、卡券 ${diffs.coupons.length} 项、冻结 ${diffs.frozen.length} 项${diffs.chain ? '、余额链断裂' : ''}）`)
       if (!silent) {
         if (diffs.openCount === 0) this.showToast(`🧮 ${d} 对账完成：账实相符`, 'success')
         else this.showToast(`🧮 ${d} 对账完成：${diffs.openCount} 项差异待运营复核`, 'warn')
@@ -1397,26 +1759,66 @@ export const usePlatformStore = defineStore('platform', {
         actions.push({ type: 'stock', label: x.name, delta: -x.diff })
       })
 
-      if (!actions.length && !manualPoints && !live2.chain && !live2.frozen.length) {
+      // 4) 卡券账户补偿（P6）：
+      //    漏发券：按有效业务记录补发新券（新券码、有效期自补券日起算，append-only 不伪造历史），按 recordId 幂等；
+      //    到期未流转：执行到期扫描置为 expired；
+      //    孤立券/重复码/核销信息缺失：人工核查，不自动作废、不改写。
+      let couponIssued = 0
+      let couponExpiredFixed = 0
+      let couponManual = 0
+      live2.coupons.forEach((x) => {
+        if (x.kind === 'missing') {
+          const rec = this.records.find((r) => r.id === x.recordId)
+          if (!rec || this.coupons.some((c) => c.recordId === rec.id)) return
+          const c = this.issueCouponForRecord(rec, { source: '对账补券', compensateBillId: bill0.id })
+          if (c) {
+            // 补券台账标记为 comp（issueCouponForRecord 默认按来源写 issue/deliver，这里补一条补偿凭证勾稽差异单）
+            this.addCouponLog('comp', c.id, rec, { code: c.code, note: `按 ${date} 差异单补发，有效期自补券日起算` })
+            this.addAuditLog('coupon-comp', bill0.id,
+              `对账补偿：业务记录【${x.target}】券账户漏发，补发新券 ${c.code}（有效期至 ${c.expireDate}，原始记录保留）`)
+            actions.push({ type: 'coupon', label: x.target, delta: 1, code: c.code })
+            couponIssued += 1
+          }
+        } else if (x.kind === 'expired-pending') {
+          const c = this.coupons.find((y) => y.id === x.couponId)
+          if (c && c.status === 'available' && c.expireTs < Date.now()) {
+            c.status = 'expired'
+            const rec = this.records.find((r) => r.id === c.recordId) || null
+            this.addCouponLog('expire', c.id, rec, { code: c.code, note: `按 ${date} 差异单补做到期流转` })
+            actions.push({ type: 'coupon-expire', label: x.target, delta: 0, code: c.code })
+            couponExpiredFixed += 1
+          }
+        } else {
+          couponManual += 1
+        }
+      })
+
+      if (!actions.length && !manualPoints && !couponManual && !live2.chain && !live2.frozen.length) {
         this.showToast('账目已平，无需重复补偿', 'info')
         return null
       }
 
-      const pointDelta = actions.filter((a) => a.type !== 'stock').reduce((s, a) => s + a.delta, 0)
+      const pointDelta = actions.filter((a) => a.type !== 'stock' && a.type !== 'coupon' && a.type !== 'coupon-expire')
+        .reduce((s, a) => s + a.delta, 0)
       const stockCount = actions.filter((a) => a.type === 'stock').length
+      const couponCount = couponIssued
       if (actions.length) {
         bill0.compensations.unshift({
           id: genId('rcc'), at: `${this.todayDate} ${nowTime()}`,
-          pointDelta, stockCount, note: note.trim(), reviewer: this.user.name,
+          pointDelta, stockCount, couponCount, note: note.trim(), reviewer: this.user.name,
           items: actions.map((a) => ({ ...a }))
         })
       }
       this.addAuditLog('recon-comp', bill0.id,
         `补偿业务日 ${date} 差异：` +
-        actions.map((a) => a.type === 'stock'
-          ? `库存【${a.label}】校正 ${a.delta > 0 ? '+' : ''}${a.delta}`
-          : `【${a.label}】补记 +${a.delta} 积分`).join('；') +
+        actions.map((a) => {
+          if (a.type === 'stock') return `库存【${a.label}】校正 ${a.delta > 0 ? '+' : ''}${a.delta}`
+          if (a.type === 'coupon') return `卡券【${a.label}】补发新券 ${a.code}`
+          if (a.type === 'coupon-expire') return `卡券【${a.label}】补做到期失效`
+          return `【${a.label}】补记 +${a.delta} 积分`
+        }).join('；') +
         (manualPoints ? `；另有积分长款 ${manualPoints}（流水多记/来源不明），已标记需人工核查，未自动扣减` : '') +
+        (couponManual ? `；另有 ${couponManual} 项卡券异常（孤立券/重复码/核销信息缺失）需人工核查，未自动处理` : '') +
         (live2.frozen.length ? `；${live2.frozen.length} 项冻结单据不一致需在风控申诉中处理` : '') +
         (note.trim() ? `；备注：${note.trim()}` : '') + '；原始记录保留未改写')
 
@@ -1428,9 +1830,11 @@ export const usePlatformStore = defineStore('platform', {
       const parts = []
       if (pointDelta) parts.push(`补记积分 +${pointDelta}`)
       if (stockCount) parts.push(`校正 ${stockCount} 项库存`)
-      this.showToast(parts.length ? `🧮 补偿完成：${parts.join('，')}，余额与库存已同步` : '🧮 补偿已记录，剩余差异需人工处理',
+      if (couponCount) parts.push(`补发 ${couponCount} 张卡券`)
+      if (couponExpiredFixed) parts.push(`${couponExpiredFixed} 张卡券补做到期`)
+      this.showToast(parts.length ? `🧮 补偿完成：${parts.join('，')}，余额/库存/卡券已同步` : '🧮 补偿已记录，剩余差异需人工处理',
         refreshed.diffs.openCount === 0 ? 'success' : 'warn')
-      return { pointDelta, stockCount, manualPoints, actions }
+      return { pointDelta, stockCount, couponCount, couponExpiredFixed, manualPoints, couponManual, actions }
     },
 
     // ===== 演示用：注入账实差异（模拟漏记/盘亏，便于观察对账→复核→补偿闭环） =====
@@ -1550,7 +1954,7 @@ export const usePlatformStore = defineStore('platform', {
         id: 'seed-r2', type: 'draw', status: 'frozen',
         date: this.todayDate, time: '09:40:08', ts: todayAt(9, 40),
         activityId: 'act-2', activityName: '新人刮刮乐',
-        prizeId: 'p2', prizeName: '视频月卡', rarity: 'epic', icon: '🎬',
+        prizeId: 'p2', prizeName: '视频月卡', rarity: 'epic', couponId: 'c-video-month', icon: '🎬',
         riskOrderId: 'seed-rk2'
       }
       this.records.push(rec2)
@@ -1614,11 +2018,11 @@ export const usePlatformStore = defineStore('platform', {
         reviewedAt: `${this.todayDate} 09:10:12`
       })
 
-      // —— 5) 已撤销：视频会员周卡（80 积分冻结后返还 + 库存预占后回补，业务记录保留为 revoked） ——
+      // —— 5) 已撤销：视频会员周卡（80 积分冻结后返还 + 券库存预占后回补，业务记录保留为 revoked；券从未发出） ——
       const rec5 = {
         id: 'seed-r5', type: 'redeem', status: 'revoked',
         date: this.todayDate, time: '08:30:05', ts: todayAt(8, 30),
-        goodsId: 'g2', goodsName: '视频会员周卡', icon: '🎬', riskOrderId: 'seed-rk5'
+        goodsId: 'g2', goodsName: '视频会员周卡', couponId: 'c-video-week', icon: '🎬', riskOrderId: 'seed-rk5'
       }
       this.records.push(rec5)
       this.riskOrders.push({
@@ -1739,19 +2143,125 @@ export const usePlatformStore = defineStore('platform', {
         bizDate: d1, grantDate: d1, time: '18:40:00', ts: todayAt(18, 40) - DAY, source: 'manual-gap'
       })
 
-      // 初始可用积分 255（含一笔历史漏记：业务台账 +5 未入账）：种子实时扣减 -360
-      // （在途冻结 -10/-200；已撤销兑换 -80 已 +80 返还，净 0；实物帆布袋兑换 -150），起点补 615 → 255。
-      // 种子流水合计 -350，rebalanceSeedPoints 倒推重放后链连续、最新快照 255。
+      // —— 9) 卡券账户与核销种子 ——
+      // 9a) 今日正常兑换：满50减10优惠券（30 积分）→ 待核销，用户可出示券码
+      const g1now = this.goods.find((g) => g.id === 'g1')
+      if (g1now) g1now.remain -= 1
+      this.points -= 30
+      const rec8 = {
+        id: 'seed-r8', type: 'redeem', status: 'normal',
+        date: this.todayDate, time: '14:02:11', ts: todayAt(14, 2),
+        goodsId: 'g1', goodsName: '满50减10优惠券', couponId: 'c-discount-10', icon: '🎟️'
+      }
+      this.records.push(rec8)
+      this.pointRecords.unshift({
+        id: 'seed-pr8', date: this.todayDate, time: '14:02:11', ts: todayAt(14, 2),
+        delta: -30, balance: this.points, note: '兑换：满50减10优惠券', kind: 'normal'
+      })
+
+      // 9b) 今日正常兑换：视频会员周卡（80 积分）→ 今日已由运营核销
+      const g2now = this.goods.find((g) => g.id === 'g2')
+      if (g2now) g2now.remain -= 1
+      this.points -= 80
+      const rec9 = {
+        id: 'seed-r9', type: 'redeem', status: 'normal',
+        date: this.todayDate, time: '11:18:40', ts: todayAt(11, 18),
+        goodsId: 'g2', goodsName: '视频会员周卡', couponId: 'c-video-week', icon: '🎬'
+      }
+      this.records.push(rec9)
+      this.pointRecords.unshift({
+        id: 'seed-pr9', date: this.todayDate, time: '11:18:40', ts: todayAt(11, 18),
+        delta: -80, balance: this.points, note: '兑换：视频会员周卡', kind: 'normal'
+      })
+
+      // 9c) 10 天前兑换：满50减10优惠券（30 积分）→ 30 天有效，今日已核销（历史核销留痕）
+      if (g1now) g1now.remain -= 1
+      this.points -= 30
+      const rec10 = {
+        id: 'seed-r10', type: 'redeem', status: 'normal',
+        date: dateStr(-10), time: '10:30:00', ts: todayAt(10, 30) - 10 * DAY,
+        goodsId: 'g1', goodsName: '满50减10优惠券', couponId: 'c-discount-10', icon: '🎟️'
+      }
+      this.records.push(rec10)
+      this.pointRecords.unshift({
+        id: 'seed-pr10', date: dateStr(-10), time: '10:30:00', ts: todayAt(10, 30) - 10 * DAY,
+        delta: -30, balance: this.points, note: '兑换：满50减10优惠券', kind: 'normal'
+      })
+
+      // 9d) 13 天前兑换：满50减10优惠券（30 积分）→ 已过期（发券 + 到期两条台账）
+      if (g1now) g1now.remain -= 1
+      this.points -= 30
+      const rec11 = {
+        id: 'seed-r11', type: 'redeem', status: 'normal',
+        date: dateStr(-13), time: '09:05:00', ts: todayAt(9, 5) - 13 * DAY,
+        goodsId: 'g1', goodsName: '满50减10优惠券', couponId: 'c-discount-10', icon: '🎟️'
+      }
+      this.records.push(rec11)
+      this.pointRecords.unshift({
+        id: 'seed-pr11', date: dateStr(-13), time: '09:05:00', ts: todayAt(9, 5) - 13 * DAY,
+        delta: -30, balance: this.points, note: '兑换：满50减10优惠券', kind: 'normal'
+      })
+
+      // 卡券实例（直接落账户；状态机字段完整，供出示/核销/到期/对账各场景演示）
+      const tplDisc = this.couponTpls['c-discount-10']
+      const tplWeek = this.couponTpls['c-video-week']
+      const mkCouponSeed = (id, tpl, rec, status, issueDate, patch = {}) => {
+        const exp = this._couponExpiry(tpl, issueDate)
+        return {
+          id, code: patch.code, tplId: tpl.id, name: tpl.name, type: tpl.type,
+          typeLabel: COUPON_TYPES[tpl.type]?.label || tpl.type, emoji: tpl.emoji,
+          denomination: tpl.denomination || 0, threshold: tpl.threshold || 0,
+          face: tpl.face || '', desc: tpl.desc || '', validityDays: tpl.validityDays || 30,
+          status, userId: uid, userName: uname, recordId: rec.id, bizType: rec.type,
+          activityId: null, source: '积分兑换',
+          issueDate, time: rec.time, ts: rec.ts + 1,
+          expireDate: exp.date, expireTs: exp.ts,
+          redeemedAt: '', redeemOperator: '', redeemChannel: '', redeemNote: '',
+          compensateBillId: '', comp: false, ...patch
+        }
+      }
+      const cpAvail = mkCouponSeed('seed-cp1', tplDisc, rec8, 'available', this.todayDate, { code: 'CP-A1B2C-3D4E5' })
+      const cpRedeemToday = mkCouponSeed('seed-cp2', tplWeek, rec9, 'redeemed', this.todayDate, {
+        code: 'CP-W7K8M-9P2QR', redeemedAt: `${this.todayDate} 15:20:36`,
+        redeemOperator: '运营小张', redeemChannel: '到店扫码', redeemNote: '门店 POS 扫码核销，已开通 7 天会员'
+      })
+      const cpRedeemHist = mkCouponSeed('seed-cp3', tplDisc, rec10, 'redeemed', dateStr(-10), {
+        code: 'CP-H5J6N-8K3LM', redeemedAt: `${dateStr(-8)} 16:02:09`,
+        redeemOperator: '运营小王', redeemChannel: '到店扫码', redeemNote: '历史核销'
+      })
+      const cpExpired = mkCouponSeed('seed-cp4', tplDisc, rec11, 'expired', dateStr(-13), { code: 'CP-E9X2T-6V4ZW' })
+      this.coupons.push(cpExpired, cpRedeemHist, cpRedeemToday, cpAvail)
+
+      // 卡券业务台账（append-only，按时间倒序：核销/发放/到期/预占/释放）
+      this.couponLogs = [
+        { id: 'seed-cl9', action: 'redeem', actionLabel: '卡券核销', couponId: cpRedeemToday.id, code: cpRedeemToday.code, tplId: tplWeek.id, tplName: tplWeek.name, recordId: rec9.id, bizType: 'redeem', orderId: '', operator: '运营(运营小张)', note: '到店扫码：门店 POS 扫码核销，已开通 7 天会员', date: this.todayDate, time: '15:20:36', ts: todayAt(15, 20) },
+        { id: 'seed-cl8', action: 'issue', actionLabel: '卡券发放', couponId: cpAvail.id, code: cpAvail.code, tplId: tplDisc.id, tplName: tplDisc.name, recordId: rec8.id, bizType: 'redeem', orderId: '', operator: uname, note: '', date: this.todayDate, time: '14:02:11', ts: todayAt(14, 2) + 1 },
+        { id: 'seed-cl7', action: 'issue', actionLabel: '卡券发放', couponId: cpRedeemToday.id, code: cpRedeemToday.code, tplId: tplWeek.id, tplName: tplWeek.name, recordId: rec9.id, bizType: 'redeem', orderId: '', operator: uname, note: '', date: this.todayDate, time: '11:18:40', ts: todayAt(11, 18) + 1 },
+        { id: 'seed-cl6', action: 'hold', actionLabel: '风控预占', couponId: '', code: '', tplId: 'c-video-month', tplName: '视频月卡', recordId: 'seed-r2', bizType: 'draw', orderId: 'seed-rk2', operator: uname, note: '风控冻结，券库存预占、待放行交付', date: this.todayDate, time: '09:40:08', ts: todayAt(9, 40) },
+        { id: 'seed-cl5', action: 'redeem', actionLabel: '卡券核销', couponId: cpRedeemHist.id, code: cpRedeemHist.code, tplId: tplDisc.id, tplName: tplDisc.name, recordId: rec10.id, bizType: 'redeem', orderId: '', operator: '运营(运营小王)', note: '到店扫码：历史核销', date: dateStr(-8), time: '16:02:09', ts: todayAt(16, 2) - 8 * DAY },
+        { id: 'seed-cl4', action: 'issue', actionLabel: '卡券发放', couponId: cpRedeemHist.id, code: cpRedeemHist.code, tplId: tplDisc.id, tplName: tplDisc.name, recordId: rec10.id, bizType: 'redeem', orderId: '', operator: uname, note: '', date: dateStr(-10), time: '10:30:00', ts: todayAt(10, 30) - 10 * DAY + 1 },
+        { id: 'seed-cl3', action: 'expire', actionLabel: '到期失效', couponId: cpExpired.id, code: cpExpired.code, tplId: tplDisc.id, tplName: tplDisc.name, recordId: rec11.id, bizType: 'redeem', orderId: '', operator: '系统', note: '到期日 23:59 后自动失效', date: dateStr(-11), time: '00:00:05', ts: todayAt(0, 0) - 11 * DAY + 5000 },
+        { id: 'seed-cl2', action: 'issue', actionLabel: '卡券发放', couponId: cpExpired.id, code: cpExpired.code, tplId: tplDisc.id, tplName: tplDisc.name, recordId: rec11.id, bizType: 'redeem', orderId: '', operator: uname, note: '', date: dateStr(-13), time: '09:05:00', ts: todayAt(9, 5) - 13 * DAY + 1 },
+        { id: 'seed-cl1', action: 'revoke', actionLabel: '撤销释放', couponId: '', code: '', tplId: 'c-video-week', tplName: '视频会员周卡', recordId: 'seed-r5', bizType: 'redeem', orderId: 'seed-rk5', operator: '系统', note: '风控撤销，券库存回补、券未发放', date: this.todayDate, time: '08:35:00', ts: todayAt(8, 35) }
+      ]
+
+      // 初始可用积分 255（含一笔历史漏记：业务台账 +5 未入账）：
+      // 种子实时积分变动 -530（冻结 -10/-200、撤销冻结 -80 后返还 +80 净 0、
+      // 实物帆布袋 -150、卡券兑换 满减券×3 -90 与周卡 -80），起点补 785 → 255。
+      // 种子流水合计 -520，rebalanceSeedPoints 倒推重放后链连续、最新快照 255。
       // 对账检出并补偿历史漏记 +5 后余额 260，与补偿流水链配平。
-      this.points += 615
+      this.points += 785
       // 修正流水余额快照（append-only，重排后顺序写入当时余额）
       this.rebalanceSeedPoints()
 
       // 审计日志（最新在前）
       this.auditLogs = [
+        { id: 'seed-log12', action: 'coupon-redeem', actionLabel: '卡券核销', orderId: '', operator: '运营(运营小张)', detail: `核销卡券【视频会员周卡】券码 ${cpRedeemToday.code}（用户 ${uname}，渠道 到店扫码，有效期至 ${cpRedeemToday.expireDate}）；备注：门店 POS 扫码核销，已开通 7 天会员`, date: this.todayDate, time: '15:20:36' },
+        { id: 'seed-log11', action: 'coupon-issue', actionLabel: '卡券发放', orderId: '', operator: uname, detail: `发放卡券【满50减10优惠券】（券码 ${cpAvail.code}，有效期至 ${cpAvail.expireDate}）：积分兑换【满50减10优惠券】`, date: this.todayDate, time: '14:02:11' },
+        { id: 'seed-log10', action: 'coupon-hold', actionLabel: '卡券预占', orderId: 'seed-rk2', operator: uname, detail: '抽奖【视频月卡】风控冻结：券库存预占 1，券码待放行后交付', date: this.todayDate, time: '09:40:08' },
         { id: 'seed-log9', action: 'ship-create', actionLabel: '生成发货单', orderId: 'seed-sp2', operator: uname, detail: '兑换实物【定制帆布袋】生成发货单，待用户填写收货信息', date: this.todayDate, time: '13:26:55' },
         { id: 'seed-log8', action: 'ship-send', actionLabel: '运营发货', orderId: 'seed-sp1', operator: '运营小张', detail: '接单发货【500元购物卡】：顺丰速运 单号 SF1024888661，收件人 李运营（上海市浦东新区 张江高科技园区博云路2号）；备注：内含购物卡，请当面验货', date: this.todayDate, time: '11:05:40' },
-        { id: 'seed-log5', action: 'revoke', actionLabel: '审核撤销', orderId: 'seed-rk5', operator: '系统', detail: '撤销兑换【视频会员周卡】，返还80积分、回补库存×1；备注：命中短时连续兑换规则，自动拦截，用户未申诉。', date: this.todayDate, time: '08:35:00' },
+        { id: 'seed-log5', action: 'revoke', actionLabel: '审核撤销', orderId: 'seed-rk5', operator: '系统', detail: '撤销兑换【视频会员周卡】，返还80积分、回补库存×1、释放预占券（未发放）；备注：命中短时连续兑换规则，自动拦截，用户未申诉。', date: this.todayDate, time: '08:35:00' },
         { id: 'seed-log4', action: 'release', actionLabel: '审核放行', orderId: 'seed-rk4', operator: '运营小张', detail: '放行抽奖【500元购物卡】；备注：核实为正常用户，放行并发奖。', date: this.todayDate, time: '09:10:12' },
         { id: 'seed-log3', action: 'appeal', actionLabel: '用户申诉', orderId: 'seed-rk2', operator: uname, detail: '用户提交申诉：本人正常参与活动中奖，未使用任何外挂，请求放行。', date: this.todayDate, time: '09:45:30' },
         { id: 'seed-log2', action: 'freeze', actionLabel: '风控冻结', orderId: 'seed-rk3', operator: uname, detail: '兑换【盲盒福袋】命中规则：高价值奖品/兑换、短时间连续兑换，冻结200积分、预占库存×1', date: this.todayDate, time: '09:15:22' },

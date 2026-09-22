@@ -47,10 +47,11 @@
           演示注入：
           <button class="btn-inj" @click="injectGap">📝 任务奖励漏记 +30</button>
           <button class="btn-inj" @click="injectLoss">📦 商品盘亏 1 件</button>
+          <button class="btn-inj" @click="injectCouponGap">🎟️ 卡券漏发 1 张</button>
         </span>
       </div>
       <p class="rule-hint">
-        口径：P1 积分发生额（抽奖成本/中奖、兑换/返还、任务奖励）· P2 任务奖励逐笔台账 · P3 流水余额链 · P4 风控冻结单据与预占 · P5 库存账实。
+        口径：P1 积分发生额（抽奖成本/中奖、兑换/返还、任务奖励）· P2 任务奖励逐笔台账 · P3 流水余额链 · P4 风控冻结单据与预占 · P5 库存账实 · P6 卡券账户（发券/核销勾稽、券码唯一、到期状态）。
         重复执行按差异签名幂等（账无变化不重建单、不重复补偿）；跨日补偿带业务日归属，原始记录一律保留。
       </p>
     </div>
@@ -188,6 +189,24 @@
           </div>
         </div>
 
+        <!-- P6 卡券账户 -->
+        <div class="diff-section">
+          <div class="ds-title">
+            P6 · 卡券账户勾稽（发券 / 核销 / 到期）
+            <span class="ds-ok" v-if="bill.diffs.coupons.length === 0">✅ 有效券记录均已发券，券码唯一、核销与到期状态一致</span>
+            <span class="ds-bad" v-else>⚠️ {{ bill.diffs.coupons.length }} 项卡券差异</span>
+          </div>
+          <div v-for="cp in bill.diffs.coupons" :key="cp.key" class="diff-row">
+            <span class="dr-ic">🎟️</span>
+            <span class="dr-label">
+              【{{ cp.target }}】{{ couponDiffText(cp) }}
+              <em v-if="cp.code" class="muted">券码 {{ cp.code }}</em>
+            </span>
+            <span v-if="cp.autoFixable" class="dr-fix ok-tag">{{ cp.kind === 'missing' ? '可自动补发新券' : '可自动补做到期' }}</span>
+            <span v-else class="dr-fix warn-tag">需人工核查，不自动作废/改码</span>
+          </div>
+        </div>
+
         <!-- 运营操作区 -->
         <div v-if="store.isOperator" class="bill-actions">
           <template v-if="bill.status === 'pending'">
@@ -223,11 +242,12 @@
               <span>{{ c.at }} · {{ c.reviewer }}</span>
               <span class="cr-delta" v-if="c.pointDelta">补记 +{{ c.pointDelta }} 积分</span>
               <span class="cr-delta stock" v-if="c.stockCount">校正 {{ c.stockCount }} 项库存</span>
+              <span class="cr-delta coupon" v-if="c.couponCount">补发 {{ c.couponCount }} 张卡券</span>
             </div>
             <div class="cr-items">
-              <span v-for="(a, i) in c.items" :key="i" class="exp-chip" :class="a.type === 'stock' ? 'minus' : 'plus'">
-                {{ a.type === 'stock' ? '库存校正' : '补记' }} · {{ a.label }}
-                <b>{{ a.delta > 0 ? '+' : '' }}{{ a.delta }}</b>
+              <span v-for="(a, i) in c.items" :key="i" class="exp-chip" :class="a.type === 'stock' || a.type === 'coupon' || a.type === 'coupon-expire' ? 'minus' : 'plus'">
+                {{ a.type === 'stock' ? '库存校正' : a.type === 'coupon' ? '补券' : a.type === 'coupon-expire' ? '券到期' : '补记' }} · {{ a.label }}
+                <b v-if="a.code">（{{ a.code }}）</b>
               </span>
             </div>
             <div v-if="c.note" class="cr-note">备注：{{ c.note }}</div>
@@ -323,6 +343,23 @@ function injectLoss() {
     return
   }
   store.injectStockLoss()
+}
+function injectCouponGap() {
+  if (selectedDate.value !== store.todayDate) {
+    store.showToast('演示差异注入仅支持今日业务日', 'warn')
+    return
+  }
+  store.injectCouponGap()
+}
+// P6 卡券差异文案
+function couponDiffText(cp) {
+  return {
+    missing: '业务记录有效但券账户漏发（应有券实例 / 实际无）',
+    orphan: '券实例回指业务记录异常（孤立券）',
+    duplicate: '存在重复券码（全局唯一性被破坏）',
+    'redeem-info': '已核销券缺少核销人/核销时间',
+    'expired-pending': '已过有效期但账户仍标记待核销（到期未流转）'
+  }[cp.kind] || cp.kind
 }
 </script>
 
@@ -468,6 +505,7 @@ function injectLoss() {
 .cr-top { display: flex; align-items: center; gap: 10px; font-size: 11px; color: #8ba2c8; }
 .cr-delta { font-weight: 700; color: #7ef0c9; }
 .cr-delta.stock { color: #ffb74d; }
+.cr-delta.coupon { color: #ce93d8; }
 .cr-items { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 7px; }
 .cr-note { font-size: 11px; color: #9db0d0; margin-top: 6px; }
 .trace-row { display: flex; align-items: center; gap: 10px; font-size: 11px; padding: 5px 0; }

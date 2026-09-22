@@ -31,6 +31,14 @@
       <span class="re-go">去填写 / 查看 ›</span>
     </div>
 
+    <!-- 卡券账户快捷入口 -->
+    <div class="coupon-entry" @click="store.gotoTab('coupon')">
+      <span>🎟️ 你有 <b>{{ store.myCouponTodoCount }}</b> 张待核销卡券
+        <template v-if="store.myHeldCoupons.length"> · 🧊 {{ store.myHeldCoupons.length }} 张风控预占待交付</template>
+      </span>
+      <span class="re-go">出示券码 / 查看 ›</span>
+    </div>
+
     <div class="points-grid">
       <!-- 任务列表 -->
       <div class="card">
@@ -77,7 +85,7 @@
             <span class="g-icon">{{ g.icon }}</span>
             <div class="g-info">
               <div class="g-name">{{ g.name }}
-                <i class="g-kind" :class="g.physical ? 'physical' : 'virtual'">{{ g.physical ? '实物·需收货' : '虚拟·即到账' }}</i>
+                <i class="g-kind" :class="g.physical ? 'physical' : (g.couponId ? 'coupon' : 'virtual')">{{ g.physical ? '实物·需收货' : (g.couponId ? '券类·发券核销' : '虚拟·即到账') }}</i>
               </div>
               <div class="g-stock">
                 可兑 {{ g.remain }}
@@ -184,6 +192,15 @@ const drawState = (taskId) => store.drawTaskState(taskId)
 .ship-entry .re-go { color: #c8e6c9; font-weight: 700; }
 .ship-entry:hover { background: rgba(76,175,80,0.16); }
 
+.coupon-entry {
+  display: flex; align-items: center; justify-content: space-between;
+  background: rgba(171,71,188,0.1); border: 1px solid rgba(171,71,188,0.35);
+  border-radius: 12px; padding: 12px 16px; font-size: 13px; color: #e1bee7; cursor: pointer;
+}
+.coupon-entry b { color: #ce93d8; font-size: 15px; }
+.coupon-entry .re-go { color: #f3e5f5; font-weight: 700; }
+.coupon-entry:hover { background: rgba(171,71,188,0.18); }
+
 .points-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
 @media (max-width: 860px) { .points-grid { grid-template-columns: 1fr; } .span2 { grid-column: auto !important; } .card { grid-column: auto !important; } }
 .card {
@@ -240,6 +257,7 @@ const drawState = (taskId) => store.drawTaskState(taskId)
 .g-kind { font-style: normal; font-size: 9px; padding: 1px 6px; border-radius: 4px; margin-left: 5px; vertical-align: middle; }
 .g-kind.physical { background: rgba(76,175,80,0.16); color: #7ef0c9; }
 .g-kind.virtual { background: rgba(120,160,220,0.12); color: #8ba2c8; }
+.g-kind.coupon { background: rgba(171,71,188,0.22); color: #ce93d8; }
 .g-stock { font-size: 10px; color: #6f84ab; }
 .g-frozen { color: #81d4fa; }
 .g-btns { display: flex; align-items: center; gap: 8px; }

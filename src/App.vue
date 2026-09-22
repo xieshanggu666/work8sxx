@@ -14,6 +14,7 @@
           <i v-if="t.key === 'risk' && store.pendingRiskCount" class="tab-badge">{{ store.pendingRiskCount }}</i>
           <i v-else-if="t.key === 'recon' && store.reconOpenCount" class="tab-badge recon">{{ store.reconOpenCount }}</i>
           <i v-else-if="t.key === 'shipping' && shipBadge" class="tab-badge ship">{{ shipBadge }}</i>
+          <i v-else-if="t.key === 'coupon' && couponBadge" class="tab-badge coupon">{{ couponBadge }}</i>
         </button>
       </nav>
       <div class="user">
@@ -42,6 +43,7 @@
 
       <PointsCenter v-else-if="tab === 'points'" />
       <ShipCenter v-else-if="tab === 'shipping'" />
+      <CouponCenter v-else-if="tab === 'coupon'" />
       <RiskCenter v-else-if="tab === 'risk'" />
       <ReconcileView v-else-if="tab === 'recon'" />
       <DashboardView v-else-if="tab === 'dashboard'" />
@@ -65,6 +67,7 @@ import { usePlatformStore } from '@/store/platform'
 import ActivityView from '@/components/ActivityView.vue'
 import PointsCenter from '@/components/PointsCenter.vue'
 import ShipCenter from '@/components/ShipCenter.vue'
+import CouponCenter from '@/components/CouponCenter.vue'
 import RiskCenter from '@/components/RiskCenter.vue'
 import ReconcileView from '@/components/ReconcileView.vue'
 import DashboardView from '@/components/DashboardView.vue'
@@ -81,6 +84,7 @@ const tabs = [
   { key: 'home', label: '🎡 抽奖活动' },
   { key: 'points', label: '🪙 积分中心' },
   { key: 'shipping', label: '📦 物流发货' },
+  { key: 'coupon', label: '🎟️ 卡券核销' },
   { key: 'risk', label: '🛡️ 风控申诉' },
   { key: 'recon', label: '🧮 积分库存对账' },
   { key: 'dashboard', label: '📊 运营看板' },
@@ -93,6 +97,9 @@ const activeExists = computed(() => store.activities.some((a) => a.status === 'r
 // 物流 Tab 角标：用户看待办（待填地址/待收货），运营看待接单发货
 const shipBadge = computed(() =>
   store.role === 'operator' ? store.pendingShipCount : store.myShipTodoCount)
+// 卡券 Tab 角标：用户看待核销券数，运营看待核销队列（含风控预占待交付提示由卡券页展示）
+const couponBadge = computed(() =>
+  store.role === 'operator' ? store.pendingRedeemCount : store.myCouponTodoCount)
 
 // 统一业务日切换：页面常开时定时器轮询；页面从后台重新可见时立即检查
 let dayTimer = null
@@ -171,6 +178,7 @@ onBeforeUnmount(() => {
 }
 .tab-badge.recon { background: #00897b; box-shadow: 0 2px 6px rgba(0,137,123,0.5); }
 .tab-badge.ship { background: #43a047; box-shadow: 0 2px 6px rgba(67,160,71,0.5); }
+.tab-badge.coupon { background: #8e24aa; box-shadow: 0 2px 6px rgba(142,36,170,0.5); }
 
 .content { max-width: 1200px; margin: 0 auto; padding: 24px; }
 .activity-switch { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 20px; }
